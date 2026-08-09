@@ -1,0 +1,4 @@
+# 静态链接 MSVC CRT：产物不再依赖 vcruntime140.dll / msvcp140.dll，
+# 目标机无需安装 Visual C++ Redistributable 即可运行。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
