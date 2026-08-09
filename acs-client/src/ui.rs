@@ -183,20 +183,18 @@ fn draw_topbar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![
         Span::styled(" ● ", Style::default().fg(ACCENT2)),
         Span::styled("Alpha Wallet", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-        Span::styled(" v0.1.0", Style::default().fg(MUT)),
+        Span::styled(format!(" v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(MUT)),
     ];
     spans.push(Span::raw("   "));
     spans.push(Span::styled(w, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)));
     spans.push(Span::styled(format!(" · {atype}"), Style::default().fg(MUT)));
-    let right = format!("{synced}");
+    let right_line = Line::from(vec![Span::styled(synced, Style::default().fg(MUT))]);
     frame.render_widget(Paragraph::new(Line::from(spans)), Rect { x: area.x + 1, y: area.y, width: area.width.saturating_sub(2), height: 1 });
-    let right_w = right.chars().count() as u16;
+    // 用 Line::width() 计算真实显示宽度（中文按 2 列），避免“未同步”被截断成“未同”
+    let right_w = right_line.width() as u16;
     if area.width >= right_w + 4 {
         let right_area = Rect { x: area.x + area.width - right_w - 1, y: area.y, width: right_w + 1, height: 1 };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(right, Style::default().fg(MUT))])),
-            right_area,
-        );
+        frame.render_widget(Paragraph::new(right_line), right_area);
     }
     let line = Paragraph::new(Line::from(vec![Span::styled("─".repeat(area.width as usize), Style::default().fg(BORDER))]));
     frame.render_widget(line, Rect { x: area.x, y: area.y + 2, width: area.width, height: 1 });

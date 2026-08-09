@@ -9,7 +9,7 @@ use std::os::raw::c_void;
 /// 返回库版本（静态 C 字符串，调用方不得释放）。
 #[unsafe(no_mangle)]
 pub extern "C" fn acs_core_version() -> *const c_char {
-    b"0.1.0\0".as_ptr() as *const c_char
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
 }
 
 /// 计算 sha256 十六进制字符串。

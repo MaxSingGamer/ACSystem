@@ -1,7 +1,7 @@
 //! TUI 应用状态机：首次引导（Onboarding） + 主界面（Overview/Tx/Accounts/Settings）。
 //! 操作逻辑参考 OpenCode：顶部状态栏、分区导航、底部命令输入栏、常驻快捷键帮助。
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use acs_core::models::AccountType;
 
@@ -282,6 +282,11 @@ impl App {
 
     /// 处理键盘事件。返回是否退出。
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Windows 下 crossterm 0.28 对每个按键会额外产生一次 Release 事件，
+        // 若不过滤会导致“按一下跳两格”。只响应按下（Press）与长按（Repeat）。
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.quit();
             return;
