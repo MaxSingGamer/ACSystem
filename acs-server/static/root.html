@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alpha Coin · 根管理员</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<header>
+  <div class="topbar">
+    <div class="brand"><span class="logo"></span>Alpha Coin <span class="muted" style="font-weight:400">· 根管理员</span></div>
+    <span class="sp"></span>
+    <span class="who" id="who"></span>
+    <button class="link-btn" onclick="showChg()">修改密码</button>
+    <button class="link-btn" onclick="logout()">退出</button>
+  </div>
+</header>
+
+<div class="layout">
+  <div class="sections">
+    <div class="section-tab on" data-s="ov" onclick="sec('ov')">状态</div>
+    <div class="section-tab" data-s="acc" onclick="sec('acc')">账户</div>
+    <div class="section-tab" data-s="safe" onclick="sec('safe')">安全</div>
+    <div class="section-tab" data-s="mir" onclick="sec('mir')">镜像</div>
+    <div class="section-tab" data-s="aud" onclick="sec('aud')">审计</div>
+  </div>
+
+  <!-- 状态 -->
+  <div class="section on" id="s-ov">
+    <div class="cards">
+      <div class="card"><div class="k">当日流水</div><div class="v" id="sToday">–</div></div>
+      <div class="card"><div class="k">当日笔数</div><div class="v" id="sTodayC">–</div></div>
+      <div class="card"><div class="k">累计流水</div><div class="v" id="sTotal">–</div></div>
+      <div class="card"><div class="k">累计笔数</div><div class="v" id="sTotalC">–</div></div>
+      <div class="card"><div class="k">账户总数</div><div class="v" id="sAccounts" style="font-size:16px">–</div></div>
+    </div>
+    <div class="panel">
+      <h2>每日流水走势（近一周 / 一月 / 一年）</h2>
+      <div class="row">
+        <button class="btn-secondary btn-sm" onclick="loadDaily(7)">近一周</button>
+        <button class="btn-secondary btn-sm" onclick="loadDaily(30)">近一月</button>
+        <button class="btn-secondary btn-sm" onclick="loadDaily(365)">近一年</button>
+      </div>
+      <div class="chart" id="dailyChart"></div>
+    </div>
+  </div>
+
+  <!-- 账户 -->
+  <div class="section" id="s-acc">
+    <div class="panel">
+      <h2>账本账户（AC 账户）</h2>
+      <div class="row">
+        <select id="accType" style="width:180px">
+          <option>Country</option><option>Bank</option><option>Individual</option><option>System</option>
+        </select>
+        <input id="accSearch" placeholder="搜索 UID" style="width:220px" onkeydown="if(event.key==='Enter')loadAccounts()">
+        <button class="btn-primary btn-sm" onclick="loadAccounts()">查询</button>
+        <span class="sp"></span>
+        <span class="muted">系统账户：PreIssuedAccount / AESystem / AlphaEU</span>
+      </div>
+      <table><thead><tr><th>UID</th><th>邮箱</th><th>余额</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="accBody"></tbody></table>
+    </div>
+    <div class="panel">
+      <h2>后台管理员账户</h2>
+      <div class="row">
+        <input id="aUid" placeholder="新账号 UID" style="width:180px">
+        <input id="aPwd" type="password" placeholder="初始密码（≥8 位）" style="width:180px">
+        <select id="aRole" style="width:140px"><option value="finance">finance（金融部）</option><option value="root">root（根管理员）</option></select>
+        <button class="btn-primary btn-sm" onclick="createAdmin()">创建</button>
+      </div>
+      <table><thead><tr><th>UID</th><th>角色</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="adminBody"></tbody></table>
+    </div>
+  </div>
+
+  <!-- 安全 -->
+  <div class="section" id="s-safe">
+    <div class="panel">
+      <h2>铸造（Mint → PreIssuedAccount）</h2>
+      <div class="row">
+        <input id="mintAmt" type="number" min="1" placeholder="金额（A€）" style="width:200px">
+        <button class="btn-primary" onclick="doMint()">铸造</button>
+      </div>
+      <div class="muted">铸造仅可打入 PreIssuedAccount；需先解锁本人的铸造密钥。</div>
+      <div class="msg" id="safeMsg"></div>
+    </div>
+    <div class="panel">
+      <h2>根管理员密钥</h2>
+      <div class="kv" id="keyStatus"></div>
+      <div class="row" style="margin-top:14px">
+        <input id="keyPwd" type="password" placeholder="登录密码（用于解锁）" style="width:220px">
+        <button class="btn-primary btn-sm" onclick="unlockKey()">解锁</button>
+        <button class="btn-secondary btn-sm" onclick="lockKey()">锁定</button>
+        <button class="btn-secondary btn-sm" onclick="exportKey()">导出到 ./alpha_dir</button>
+      </div>
+      <div class="muted">解锁后可用本人密钥为铸造签名；导出将私钥（armored）写入服务端 ./alpha_dir。</div>
+    </div>
+  </div>
+
+  <!-- 镜像 -->
+  <div class="section" id="s-mir">
+    <div class="panel">
+      <h2>镜像源（只读）apikey</h2>
+      <div class="row">
+        <input id="mirName" placeholder="镜像名称" style="width:220px">
+        <button class="btn-primary btn-sm" onclick="addMirror()">生成 apikey</button>
+      </div>
+      <table><thead><tr><th>名称</th><th>apikey</th><th>状态</th><th>上次拉取</th><th>操作</th></tr></thead>
+      <tbody id="mirBody"></tbody></table>
+    </div>
+  </div>
+
+  <!-- 审计 -->
+  <div class="section" id="s-aud">
+    <div class="panel" id="audLockPanel">
+      <h2>审计 / 交易总账单（需密码解锁）</h2>
+      <div class="row">
+        <input id="audPwd" type="password" placeholder="当前登录密码" style="width:220px">
+        <button class="btn-primary btn-sm" onclick="unlockAudit()">解锁查看</button>
+      </div>
+      <div class="msg" id="audMsg"></div>
+    </div>
+    <div class="panel hidden" id="audContent">
+      <h2>管理日志（导出 .log）</h2>
+      <div class="row">
+        <input id="expFrom" placeholder="起始 YYYY-MM-DD" style="width:160px">
+        <input id="expTo" placeholder="结束 YYYY-MM-DD" style="width:160px">
+        <button class="btn-secondary btn-sm" onclick="exportLog()">导出 .log</button>
+        <span class="sp"></span>
+        <span class="muted">创建账户/改密操作不展示任何密码细节</span>
+      </div>
+      <table><thead><tr><th>ID</th><th>操作者</th><th>操作</th><th>详情</th><th>时间</th></tr></thead>
+      <tbody id="audBody"></tbody></table>
+    </div>
+    <div class="panel hidden" id="billPanel">
+      <h2>交易总账单</h2>
+      <div class="row">
+        <input id="billDate" placeholder="日期 YYYY-MM-DD" style="width:160px">
+        <button class="btn-primary btn-sm" onclick="loadBills()">查询</button>
+      </div>
+      <table><thead><tr><th>时间</th><th>类型</th><th>发送方</th><th>接收方</th><th>金额</th><th>状态</th><th>中心签名</th></tr></thead>
+      <tbody id="billBody"></tbody></table>
+    </div>
+  </div>
+</div>
+
+<!-- 修改密码弹窗 -->
+<div class="hidden" id="chgPanel" style="position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:50">
+  <div class="login-card" style="margin:0">
+    <h1>修改密码</h1>
+    <div class="sub">登录后才能修改</div>
+    <label>原密码（改自己时必填）</label><input id="cOld" type="password">
+    <label>新密码（≥8 位）</label><input id="cNew" type="password">
+    <label>目标账号（root 重置 finance 时填写，可为空=改自己）</label><input id="cTarget" placeholder="如 alpha_finance">
+    <button class="btn-primary" style="width:100%;margin-top:16px" onclick="doChg()">确认修改</button>
+    <div class="msg" id="cMsg"></div>
+    <button class="link-btn" style="width:100%;margin-top:8px" onclick="$('chgPanel').classList.add('hidden')">取消</button>
+  </div>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script src="/static/js/root.js"></script>
+</body>
+</html>

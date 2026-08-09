@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["acs-core", "acs-server", "acs-client", "acs-mirror"]
+
+[profile.release]
+lto = true
+strip = true

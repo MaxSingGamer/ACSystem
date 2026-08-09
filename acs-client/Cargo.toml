@@ -1,0 +1,19 @@
+[package]
+name = "acs-client"
+version = "0.1.0"
+edition = "2024"
+description = "A€（Alpha Coin）钱包客户端 —— CLI / TUI，界面与交互参考 OpenCode"
+license = "MIT"
+
+[dependencies]
+acs-core = { path = "../acs-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

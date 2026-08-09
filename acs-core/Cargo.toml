@@ -1,0 +1,22 @@
+[package]
+name = "acs-core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "acs_core"
+# 同时产出 rlib（Rust crate 依赖）与 cdylib（Windows .dll 动态链接），供 server/client/mirror 共用
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+chrono = "0.4.45"
+# bundled：内嵌编译 SQLite，避免依赖系统 sqlite3.lib，cdylib 自包含，便于分发
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+sha2 = "0.11.0"
+thiserror = "2.0.18"
+uuid = { version = "1.23.3", features = ["v4"] }
+hex = "0.4"
+# gpg 自动下载（Gpg4win 安装包）；Windows 用 native-tls(schannel) 避免 rustls/openssl 编译依赖
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+# 交易 JSON 化（client outbox / 网络传输）
+serde = { version = "1", features = ["derive"] }
