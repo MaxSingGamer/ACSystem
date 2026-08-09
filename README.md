@@ -217,30 +217,8 @@ ACSystem/
 ├── deploy/
 │   ├── certs/generate.ps1  # 本地证书生成（TCP 透传端到端加密时用）
 │   └── nginx/nginx-acs.conf# 可选：nginx 反代旧方案（非必须）
-├── build-packages.ps1      # 一键编译并打包 server/client/mirror
 └── .gitignore              # 敏感文件一律不提交
 ```
-
----
-
-## 九、一键安装包
-
-仓库提供打包脚本 `build-packages.ps1`：自动执行 `cargo build --release`（全 workspace），
-并将三个可执行文件分别打包为独立 zip：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File build-packages.ps1
-```
-
-产物输出到 `dist/`：
-
-| 包 | 内容 |
-|---|---|
-| `acs-server-windows-x64.zip` | `acs-server.exe` + 服务器说明（环境变量 / 启动 / 管理后台） |
-| `acs-client-windows-x64.zip` | `acs-client.exe` + 钱包使用说明 |
-| `acs-mirror-windows-x64.zip` | `acs-mirror.exe` + 镜像使用说明 |
-
-> 分发前提：目标机为 Windows x64；服务器端还需 GnuPG（`gpg.exe`）。
 
 ---
 
