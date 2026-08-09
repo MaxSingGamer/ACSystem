@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     cfg.ensure_dirs()?;
     println!("[acs-server] 数据目录: {}", cfg.data_dir.display());
 
-    let (gpg_bin, gpg_src) = acs_core::gpg_detect::ensure_gpg(&cfg.data_dir)?;
+    let (gpg_bin, gpg_src) = acs_core::gpg_detect::ensure_gpg()?;
     println!("[acs-server] gpg 来源: {:?} -> {}", gpg_src, gpg_bin.display());
     let gpg = GpgUtil::new(gpg_bin, cfg.gpg_homedir.clone());
 

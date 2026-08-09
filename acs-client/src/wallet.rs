@@ -109,7 +109,7 @@ impl Wallet {
         acs_core::db::init_local(&conn)?;
         conn.execute_batch(CLIENT_SCHEMA)?;
 
-        let (gpg_bin, _src) = acs_core::gpg_detect::ensure_gpg(&cfg.data_dir)
+        let (gpg_bin, _src) = acs_core::gpg_detect::ensure_gpg()
             .map_err(|e| anyhow!("未找到 gpg：{e}"))?;
         let gpg = GpgUtil::new(gpg_bin, cfg.gpg_homedir.clone());
 
