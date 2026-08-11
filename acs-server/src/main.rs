@@ -26,8 +26,7 @@ use tower_http::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let data_dir = std::env::var("ACS_DATA_DIR").unwrap_or_else(|_| {
-        std::env::temp_dir()
-            .join("acs-server-data")
+        acs_core::config::CoreConfig::default_alpha_dir()
             .to_string_lossy()
             .into_owned()
     });
