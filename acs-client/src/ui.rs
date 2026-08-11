@@ -259,19 +259,17 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
 /// 多行帮助面板（内容区展示，避免单行溢出）。
 fn draw_help_panel(frame: &mut Frame, area: Rect) {
     let rows: &[&str] = &[
-        "导航    ↑ / ↓          切换视图（总览/交易/账户/待提交/设置）",
-        "        1-5            直接跳到对应视图",
-        "同步    r              从中心/镜像同步账本",
-        "命令    : 或 /          打开命令输入",
-        "        help / ?       显示本帮助",
-        "开立    :open          在中心开立账户",
-        "转账    :send <uid[@类型]> <金额>   本地签名转账（写入 outbox）",
-        "        :submit [tx_id]   提交待确认交易",
-        "        :confirm [tx_id]  确认接收的交易",
-        "设置    :set server <地址>    设置中心服务器",
-        "        :set apikey <key>    设置镜像 apikey（可选）",
-        "退出    q / quit       退出程序",
-        "        Esc            关闭本帮助 / 取消输入",
+        "导航    ↑ / ↓     切换视图 · 1-5 直达",
+        "同步    r         从中心/镜像同步",
+        "命令    : 或 /     打开命令输入 · help/? 本帮助",
+        "开立    :open     在中心开立账户",
+        "转账    :send <uid[@类型]> <金额>   签名转账",
+        "        :submit [tx_id]   提交待确认",
+        "        :confirm [tx_id]  确认接收",
+        "设置    :set server <地址>   设中心",
+        "        :set apikey <key>   设镜像(可选)",
+        "退出    q / quit   退出程序",
+        "关闭    h / Esc    关闭本帮助",
     ];
     let lines: Vec<Line> = rows
         .iter()

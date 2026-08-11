@@ -311,6 +311,16 @@ impl App {
     }
 
     fn main_nav(&mut self, key: KeyEvent) {
+        // 帮助面板打开时：仅响应 h/Esc 关闭、q 退出，忽略导航键（避免画面不变但高亮乱跳）
+        if self.help_visible {
+            match key.code {
+                KeyCode::Char('h') | KeyCode::Char('H') => self.help_visible = false,
+                KeyCode::Esc => self.help_visible = false,
+                KeyCode::Char('q') => self.quit(),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit(),
             // 上下键切换主视图（同级菜单）；左右键预留为上下级菜单导航（当前无子菜单，不切换视图）

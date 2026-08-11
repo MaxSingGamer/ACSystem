@@ -60,7 +60,14 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
             best = Some((base.clone(), dt));
         }
     }
-    let (chosen, _lat) = best.ok_or_else(|| anyhow!("所有候选（中心/镜像）均不可达"))?;
+    let (chosen, _lat) = best.ok_or_else(|| {
+        anyhow!(
+            "无法连接任何候选端点（中心 {}，社区镜像 {}）：{}。请检查中心地址是否带 https、frp 隧道是否启动并绑定该域名、网络是否可达。",
+            server,
+            candidates.len().saturating_sub(1),
+            candidates.join("、")
+        )
+    })?;
 
     // 3) 从最快端点拉增量（GET /api/sync?since=X）
     let since: i64 = w
