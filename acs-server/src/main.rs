@@ -155,7 +155,7 @@ fn seed_system_accounts(
         }
         let pass = uuid::Uuid::new_v4().to_string();
         let gk = gpg
-            .generate_key(&format!("{uid} <{uid}@aeu.system>"), &pass)
+            .generate_key(&format!("{uid} <{uid}@maxshin.top>"), &pass)
             .map_err(|e| anyhow::anyhow!("生成系统账户密钥失败 {uid}: {e}"))?;
         // 导出私钥到 ./alpha_dir
         let asc = alpha_dir.join(format!("{uid}.asc"));
@@ -169,7 +169,7 @@ fn seed_system_accounts(
             &Account {
                 uid: uid.to_string(),
                 account_type: AccountType::System,
-                email: format!("{uid}@aeu.system"),
+                email: format!("{uid}@maxshin.top"),
                 pubkey: gk.pubkey,
                 encrypted_seckey: gk.encrypted_seckey,
                 balance: 0,
