@@ -5,7 +5,7 @@ async function init() {
   const me = await api('/api/admin/me');
   if (me.role !== 'root') { location.href = '/finance'; return; }
   $('who').textContent = `${me.uid} · 根管理员`;
-  await Promise.all([loadOverview(), loadAccounts(), loadAdmins(), loadKeyStatus(), loadMirrors(), loadDaily(7)]);
+  await Promise.all([loadOverview(), loadAccounts(), loadAdmins(), loadKeyStatus(), loadMirrors(), loadRegistry(), loadDaily(7)]);
 }
 init().catch(e => { if (!TOKEN) location.href = '/login'; else alert(e.message); });
 
@@ -136,6 +136,31 @@ async function addMirror() {
   $('mirName').value = ''; loadMirrors();
 }
 async function delMirror(apikey) { if (!confirm('删除该镜像 apikey？')) return; await api(`/api/admin/mirror-keys/${encodeURIComponent(apikey)}`, { method: 'DELETE' }); loadMirrors(); }
+
+/* ---------- 社区镜像注册 ---------- */
+async function loadRegistry() {
+  const d = await api('/api/admin/mirror-registry');
+  $('regBody').innerHTML = (d.items || []).map(k => `
+    <tr>
+      <td>${esc(k.url)}</td>
+      <td>${esc(k.name) || '-'}</td>
+      <td>${esc(k.note) || '-'}</td>
+      <td>${k.status === 'Active' ? '启用' : '停用'}</td>
+      <td class="ops"><button class="btn-sm btn-danger" onclick="delRegistry('${esc(k.url)}')">删除</button></td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">暂无社区镜像</td></tr>';
+}
+async function addRegistry() {
+  const url = $('regUrl').value.trim();
+  if (!url) { alert('请输入镜像地址'); return; }
+  await api('/api/admin/mirror-registry', { method: 'POST', body: JSON.stringify({ url, name: $('regName').value, note: $('regNote').value }) });
+  $('regUrl').value = ''; $('regName').value = ''; $('regNote').value = '';
+  loadRegistry();
+}
+async function delRegistry(url) {
+  if (!confirm('删除该社区镜像？')) return;
+  await api(`/api/admin/mirror-registry/${encodeURIComponent(url)}`, { method: 'DELETE' });
+  loadRegistry();
+}
 
 /* ---------- 审计 ---------- */
 async function unlockAudit() {

@@ -1,6 +1,7 @@
 //! Client（Alpha Wallet / acs-mirror）接口：账户开立、交易提交、接收方确认/拒绝、待确认查询。
 //!
-//! 认证：全部使用镜像 apikey（`mirror_keys` 表，Active），与只读镜像同一凭证体系。
+//! 认证：client 凭 ed25519 签名（开立上传公钥、提交/确认用私钥签名），不依赖镜像 apikey。
+//! 镜像 apikey 仅用于 acs-mirror 服务向中心拉取（/api/mirror/pull）。
 //! 安全：提交前校验 tx_hash 一致性 + 发送方 ed25519 签名；确认前校验接收方签名。
 
 use axum::extract::{Query, State};
@@ -27,17 +28,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/client/pending", get(pending))
 }
 
-/// 校验镜像 apikey 有效（Active）。
-fn check_apikey(conn: &Connection, apikey: &str) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) FROM mirror_keys WHERE apikey=?1 AND status='Active'",
-        params![apikey],
-        |r| r.get::<_, i64>(0),
-    )
-    .unwrap_or(0)
-        > 0
-}
-
 /// 读取账户公钥（用于验签）。
 fn account_pubkey(conn: &Connection, uid: &str, atype: AccountType) -> Option<String> {
     let table = atype.table_name();
@@ -49,7 +39,6 @@ fn account_pubkey(conn: &Connection, uid: &str, atype: AccountType) -> Option<St
 
 #[derive(Deserialize)]
 pub struct OpenReq {
-    pub apikey: String,
     pub uid: String,
     #[serde(rename = "type")]
     pub atype: String,
@@ -73,9 +62,6 @@ async fn open_account(
         .map_err(|_| ApiErr::bad_request("公钥格式无效（需为 gpg armored）"))?;
 
     let conn = st.db.lock().unwrap();
-    if !check_apikey(&conn, &req.apikey) {
-        return Err(ApiErr::forbidden("apikey 无效或已停用"));
-    }
     if account::account_exists(&conn, &req.uid, atype)? {
         return Err(ApiErr::bad_request("账户已存在"));
     }
@@ -100,7 +86,6 @@ async fn open_account(
 
 #[derive(Deserialize)]
 pub struct SubmitReq {
-    pub apikey: String,
     pub tx: Transaction,
 }
 
@@ -110,15 +95,7 @@ async fn submit(
 ) -> ApiResult<Json<serde_json::Value>> {
     let tx = req.tx;
 
-    // 1) 校验 apikey
-    {
-        let conn = st.db.lock().unwrap();
-        if !check_apikey(&conn, &req.apikey) {
-            return Err(ApiErr::forbidden("apikey 无效或已停用"));
-        }
-    }
-
-    // 2) 校验 tx_hash 一致（防篡改）
+    // 1) 校验 tx_hash 一致（防篡改）
     let expect = transaction::compute_tx_hash(&tx);
     if tx.tx_hash != expect {
         return Err(ApiErr::bad_request("交易哈希不一致（tx 被篡改）"));
@@ -160,7 +137,6 @@ async fn submit(
 
 #[derive(Deserialize)]
 pub struct ConfirmReq {
-    pub apikey: String,
     pub tx_id: String,
     pub receiver_sig: String, // 接收方用私钥对 tx_id 的 detached 签名
     pub reject_reason: Option<String>,
@@ -173,9 +149,6 @@ async fn confirm(
     let reason = req.reject_reason.clone();
     let (receiver, rtype, pubk) = {
         let conn = st.db.lock().unwrap();
-        if !check_apikey(&conn, &req.apikey) {
-            return Err(ApiErr::forbidden("apikey 无效或已停用"));
-        }
         let tx = transaction::get_transaction(&conn, &req.tx_id)
             .map_err(ApiErr::from)?
             .ok_or_else(|| ApiErr::not_found("交易不存在"))?;
@@ -211,7 +184,6 @@ async fn confirm(
 
 #[derive(Deserialize)]
 pub struct PendingQuery {
-    pub apikey: String,
     pub uid: String,
     #[serde(rename = "type", default = "default_type")]
     pub atype: String,
@@ -228,9 +200,6 @@ async fn pending(
     let atype = AccountType::from_str(&q.atype)
         .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
     let conn = st.db.lock().unwrap();
-    if !check_apikey(&conn, &q.apikey) {
-        return Err(ApiErr::forbidden("apikey 无效或已停用"));
-    }
     let txs = transaction::list_pending_for(&conn, &q.uid, atype)?;
     let items: Vec<serde_json::Value> = txs
         .iter()

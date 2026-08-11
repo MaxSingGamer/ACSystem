@@ -129,6 +129,8 @@ pub struct App {
     pending_send: Option<PendingSend>,
     pending_confirm: Option<String>,
     pub status: String,
+    /// 是否在内容区显示多行帮助面板。
+    pub help_visible: bool,
 
     // 缓存数据
     pub sync_res: Option<SyncResult>,
@@ -151,6 +153,7 @@ impl App {
             pending_send: None,
             pending_confirm: None,
             status: if initialized { "钱包已就绪".into() } else { "首次使用，请完成引导".into() },
+            help_visible: false,
             sync_res: None,
             txs: Vec::new(),
             outbox: Vec::new(),
@@ -309,12 +312,13 @@ impl App {
     fn main_nav(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.quit(),
-            KeyCode::Tab | KeyCode::Right => {
+            // 上下键切换主视图（同级菜单）；左右键预留为上下级菜单导航（当前无子菜单，不切换视图）
+            KeyCode::Down | KeyCode::Char('j') => {
                 let i = (self.view.idx() + 1) % View::ALL.len();
                 self.view = View::ALL[i];
                 self.refresh_view();
             }
-            KeyCode::Left => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let n = View::ALL.len();
                 let i = (self.view.idx() + n - 1) % n;
                 self.view = View::ALL[i];
@@ -326,6 +330,8 @@ impl App {
             KeyCode::Char('4') => self.set_view(View::Outbox),
             KeyCode::Char('5') => self.set_view(View::Settings),
             KeyCode::Char('r') | KeyCode::Char('R') => self.do_sync(),
+            KeyCode::Char('h') | KeyCode::Char('H') => self.help_visible = !self.help_visible,
+            KeyCode::Esc => self.help_visible = false,
             KeyCode::Char(':') | KeyCode::Char('/') => {
                 self.input.clear();
                 self.input_mode = InputMode::Command;
@@ -469,7 +475,8 @@ impl App {
                 }
             }
             Some("help") | Some("?") => {
-                self.status = "命令：open 开立 · sync 同步 · send <uid[@类型]> <金额> 转账 · submit [tx_id] 提交 · confirm [tx_id] 确认 · set server <地址> 设中心 · set apikey <key> 设镜像 · balance 余额 · quit 退出".into();
+                self.help_visible = true;
+                self.status = "按 h 或 Esc 关闭帮助".into();
             }
             Some("quit") | Some("q") => self.quit(),
             _ => {

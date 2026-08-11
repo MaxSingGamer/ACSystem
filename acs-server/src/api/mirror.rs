@@ -1,10 +1,10 @@
 //! 镜像同步（只读）与镜像 apikey 管理（仅 root）。
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -16,16 +16,22 @@ use crate::api::{ApiErr, ApiResult};
 use crate::auth::AuthUser;
 use crate::state::AppState;
 
-/// 公开（client/mirror 拉取，仅 apikey）。
+/// 公开：mirror 拉取（需 apikey）+ 镜像列表 / 状态 / 增量同步（client 免 apikey）。
 pub fn public_routes() -> Router<AppState> {
-    Router::new().route("/api/mirror/pull", post(pull))
+    Router::new()
+        .route("/api/mirror/pull", post(pull))
+        .route("/api/mirror/list", get(list_mirrors))
+        .route("/api/status", get(status))
+        .route("/api/sync", get(sync_public))
 }
 
-/// 管理（镜像 apikey 管理，仅 root）。
+/// 管理（镜像 apikey 管理 + 社区镜像注册，仅 root）。
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
         .route("/api/admin/mirror-keys", get(list_keys).post(create_key))
         .route("/api/admin/mirror-keys/{apikey}", delete(delete_key))
+        .route("/api/admin/mirror-registry", get(list_registry).post(add_registry))
+        .route("/api/admin/mirror-registry/{url}", delete(delete_registry))
 }
 
 #[derive(Deserialize)]
@@ -51,6 +57,20 @@ async fn pull(
     }
     let since = req.since.unwrap_or(0);
 
+    let (snapshot, hash) = build_snapshot(&conn, since)?;
+
+    conn.execute(
+        "UPDATE mirror_keys SET last_pull_at=?1 WHERE apikey=?2",
+        params![Utc::now().timestamp(), req.apikey],
+    )
+    .map_err(ApiErr::from_err)?;
+
+    let central_sig = crate::api::keys::try_sign_hash(&st, &hash);
+    Ok(Json(json!({ "ok": true, "hash": hash, "central_sig": central_sig, "data": snapshot })))
+}
+
+/// 构建增量账本快照（Confirmed 交易 + 各表账户 + sha256），供 pull 与公开 /api/sync 共用。
+fn build_snapshot(conn: &Connection, since: i64) -> Result<(serde_json::Value, String), ApiErr> {
     let mut tstmt = conn
         .prepare(
             "SELECT tx_id, tx_type, sender, sender_type, receiver, receiver_type, amount, ts, tx_hash, central_sig, status \
@@ -112,13 +132,54 @@ async fn pull(
     let mut h = Sha256::new();
     h.update(snap_str.as_bytes());
     let hash = hex::encode(h.finalize());
+    Ok((snapshot, hash))
+}
 
-    conn.execute(
-        "UPDATE mirror_keys SET last_pull_at=?1 WHERE apikey=?2",
-        params![Utc::now().timestamp(), req.apikey],
-    )
-    .map_err(ApiErr::from_err)?;
+/// 公开：可用镜像列表（client 拉取镜像地址，无需 apikey）。
+async fn list_mirrors(State(st): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let conn = st.db.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT url, name, note FROM mirror_registry WHERE status='Active' ORDER BY name")
+        .map_err(ApiErr::from_err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(json!({
+                "url": r.get::<_, String>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "note": r.get::<_, String>(2)?,
+            }))
+        })
+        .map_err(ApiErr::from_err)?;
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r.map_err(ApiErr::from_err)?);
+    }
+    Ok(Json(json!({ "mirrors": items })))
+}
 
+/// 公开：健康/延迟探测。
+async fn status(State(_st): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "ok": true,
+        "name": "acs-server",
+        "version": env!("CARGO_PKG_VERSION"),
+        "server_time": Utc::now().timestamp(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SyncQuery {
+    pub since: Option<i64>,
+}
+
+/// 公开：增量同步（client 免 apikey 从中心直拉）。
+async fn sync_public(
+    State(st): State<AppState>,
+    Query(q): Query<SyncQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let since = q.since.unwrap_or(0);
+    let conn = st.db.lock().unwrap();
+    let (snapshot, hash) = build_snapshot(&conn, since)?;
     let central_sig = crate::api::keys::try_sign_hash(&st, &hash);
     Ok(Json(json!({ "ok": true, "hash": hash, "central_sig": central_sig, "data": snapshot })))
 }
@@ -187,5 +248,88 @@ async fn delete_key(
     conn.execute("DELETE FROM mirror_keys WHERE apikey=?1", params![apikey])
         .map_err(ApiErr::from_err)?;
     log_audit(&conn, &auth.username, "delete_mirror_key", &apikey);
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------- 社区镜像注册（client 从此列表发现镜像） ----------
+
+async fn list_registry(
+    State(st): State<AppState>,
+    auth: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !auth.is_root() {
+        return Err(ApiErr::forbidden("仅根管理员可管理镜像注册"));
+    }
+    let conn = st.db.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT url, name, note, status, created_at FROM mirror_registry ORDER BY name")
+        .map_err(ApiErr::from_err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(json!({
+                "url": r.get::<_, String>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "note": r.get::<_, String>(2)?,
+                "status": r.get::<_, String>(3)?,
+                "created_at": r.get::<_, i64>(4)?,
+            }))
+        })
+        .map_err(ApiErr::from_err)?;
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r.map_err(ApiErr::from_err)?);
+    }
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+pub struct AddRegistryReq {
+    pub url: String,
+    pub name: Option<String>,
+    pub note: Option<String>,
+}
+
+async fn add_registry(
+    State(st): State<AppState>,
+    auth: AuthUser,
+    Json(req): Json<AddRegistryReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !auth.is_root() {
+        return Err(ApiErr::forbidden("仅根管理员可管理镜像注册"));
+    }
+    let url = req.url.trim().trim_end_matches('/').to_string();
+    if url.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(ApiErr::bad_request("镜像地址需以 http(s):// 开头"));
+    }
+    let conn = st.db.lock().unwrap();
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO mirror_registry(url, name, note, status, created_at) VALUES (?1,?2,?3,'Active',?4) \
+         ON CONFLICT(url) DO UPDATE SET name=excluded.name, note=excluded.note, status='Active'",
+        params![
+            url,
+            req.name.clone().unwrap_or_default().trim(),
+            req.note.clone().unwrap_or_default().trim(),
+            now
+        ],
+    )
+    .map_err(ApiErr::from_err)?;
+    log_audit(&conn, &auth.username, "add_mirror_registry", &url);
+    Ok(Json(json!({ "ok": true, "url": url })))
+}
+
+async fn delete_registry(
+    State(st): State<AppState>,
+    auth: AuthUser,
+    Path(url): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !auth.is_root() {
+        return Err(ApiErr::forbidden("仅根管理员可管理镜像注册"));
+    }
+    let url = url.replace("%2F", "/").replace("%3A", ":");
+    let conn = st.db.lock().unwrap();
+    conn.execute("DELETE FROM mirror_registry WHERE url=?1", params![url])
+        .map_err(ApiErr::from_err)?;
+    log_audit(&conn, &auth.username, "delete_mirror_registry", &url);
     Ok(Json(json!({ "ok": true })))
 }

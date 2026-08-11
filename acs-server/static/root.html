@@ -110,6 +110,18 @@
       <table><thead><tr><th>名称</th><th>apikey</th><th>状态</th><th>上次拉取</th><th>操作</th></tr></thead>
       <tbody id="mirBody"></tbody></table>
     </div>
+    <div class="panel">
+      <h2>社区镜像注册（client 可发现）</h2>
+      <div class="row">
+        <input id="regUrl" placeholder="镜像地址 https://..." style="width:280px">
+        <input id="regName" placeholder="名称（如 AEU 镜像）" style="width:180px">
+        <input id="regNote" placeholder="备注" style="width:180px">
+        <button class="btn-primary btn-sm" onclick="addRegistry()">登记</button>
+      </div>
+      <table><thead><tr><th>地址</th><th>名称</th><th>备注</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="regBody"></tbody></table>
+      <div class="msg muted">client 启动时会请求此列表并自动测速，选择延迟最低的镜像同步。</div>
+    </div>
   </div>
 
   <!-- 审计 -->

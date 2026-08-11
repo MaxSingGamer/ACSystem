@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS admins(
     key_passphrase_enc TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'Active',
     created_at INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS mirror_registry(
+    url TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'Active',
+    created_at INTEGER NOT NULL);
 "#;
 
 pub fn init_server_db(conn: &Connection) -> acs_core::errors::Result<()> {
