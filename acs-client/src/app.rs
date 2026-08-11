@@ -204,12 +204,13 @@ impl App {
     pub fn do_sync(&mut self) {
         match sync::pull(&self.wallet) {
             Ok(r) => {
+                let src = r.source.clone();
                 let _ = self
                     .wallet
                     .mark_synced(r.server_time, None);
                 self.sync_res = Some(r);
                 self.status = format!(
-                    "已同步：新增交易 {}，账户快照 {}",
+                    "已同步（{src}）：新增交易 {}，账户快照 {}",
                     self.sync_res.as_ref().map(|s| s.txs).unwrap_or(0),
                     self.sync_res.as_ref().map(|s| s.accounts).unwrap_or(0)
                 );
@@ -501,12 +502,12 @@ impl App {
                         // 不引导：直接进设置视图手动配置
                         self.mode = Mode::Main;
                         self.view = View::Settings;
-                        self.status = "可先在【设置】中填写中心地址与镜像 apikey，再按 r 同步".into();
+                        self.status = "可先在【设置】中填写中心地址，再按 r 同步".into();
                     }
                     _ => {}
                 }
             }
-            OnboardStep::NetConfig => self.onboard_text(key, OnboardField::ServerUrl, OnboardField::ApiKey),
+            OnboardStep::NetConfig => self.onboard_text(key, OnboardField::ServerUrl, OnboardField::ServerUrl),
             OnboardStep::Identity => self.onboard_text(key, OnboardField::Uid, OnboardField::Uid),
             OnboardStep::Email => self.onboard_text(key, OnboardField::Email, OnboardField::Email),
             OnboardStep::Passphrase => self.onboard_text(key, OnboardField::Pass1, OnboardField::Pass1),
@@ -563,11 +564,9 @@ impl App {
                             };
                             self.onboard.server_url = u;
                             self.onboard.error = None;
-                            self.onboard.field = OnboardField::ApiKey;
+                            self.onboard.step = OnboardStep::Identity;
+                            self.onboard.field = OnboardField::Uid;
                         }
-                    } else {
-                        self.onboard.step = OnboardStep::Identity;
-                        self.onboard.field = OnboardField::Uid;
                     }
                 } else {
                     // 校验并进入下一步
@@ -660,7 +659,6 @@ impl App {
         match result {
             Ok((_gk, uid, atype, email)) => {
                 let _ = self.wallet.set_server_url(&self.onboard.server_url);
-                let _ = self.wallet.set_mirror_apikey(&self.onboard.apikey);
                 let _ = self.wallet.init_wallet(&uid, atype, &email);
                 self.onboard.busy = false;
                 self.onboard.step = OnboardStep::Done;

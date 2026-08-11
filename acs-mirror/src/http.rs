@@ -23,6 +23,7 @@ pub fn router(state: HttpState) -> Router {
         .route("/api/account/{uid}", get(account))
         .route("/api/txs", get(txs))
         .route("/api/tx/{tx_id}", get(tx))
+        .route("/api/sync", get(sync))
         .route("/", get(root))
         .with_state(state)
 }
@@ -145,4 +146,69 @@ async fn tx(State(st): State<HttpState>, Path(tx_id): Path<String>) -> impl Into
         Some(v) => (StatusCode::OK, Json(v)).into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": "交易不存在" }))).into_response(),
     }
+}
+
+#[derive(Deserialize)]
+pub struct SyncQuery {
+    pub since: Option<i64>,
+}
+
+/// 公开增量同步（client 免 apikey 从镜像拉取；字段与中心 /api/sync 兼容）。
+async fn sync(State(st): State<HttpState>, Query(q): Query<SyncQuery>) -> Json<Value> {
+    let s = st.store.lock().unwrap();
+    let since = q.since.unwrap_or(0);
+    let mut tstmt = s
+        .conn
+        .prepare(
+            "SELECT tx_id, tx_type, peer, peer_type, amount, ts, tx_hash, central_sig, status \
+             FROM local_ledger WHERE ts>?1 ORDER BY ts ASC",
+        )
+        .unwrap();
+    let trows = tstmt
+        .query_map(params![since], |r| {
+            Ok(json!({
+                "tx_id": r.get::<_, String>(0)?,
+                "tx_type": r.get::<_, String>(1)?,
+                "peer": r.get::<_, String>(2)?,
+                "peer_type": r.get::<_, String>(3)?,
+                "amount": r.get::<_, i64>(4)?,
+                "timestamp": r.get::<_, i64>(5)?,
+                "tx_hash": r.get::<_, String>(6)?,
+                "central_sig": r.get::<_, Option<String>>(7)?,
+                "status": r.get::<_, String>(8)?,
+            }))
+        })
+        .unwrap();
+    let txs: Vec<Value> = trows.flatten().collect();
+
+    let mut astmt = s
+        .conn
+        .prepare("SELECT uid, type, balance, status, last_tx_hash, changed_at FROM mirror_accounts ORDER BY uid")
+        .unwrap();
+    let arows = astmt
+        .query_map([], |r| {
+            Ok(json!({
+                "uid": r.get::<_, String>(0)?,
+                "type": r.get::<_, String>(1)?,
+                "balance": r.get::<_, i64>(2)?,
+                "status": r.get::<_, String>(3)?,
+                "last_tx_hash": r.get::<_, Option<String>>(4)?,
+                "changed_at": r.get::<_, i64>(5)?,
+            }))
+        })
+        .unwrap();
+    let accounts: Vec<Value> = arows.flatten().collect();
+
+    let server_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Json(json!({
+        "ok": true,
+        "data": {
+            "server_time": server_time,
+            "transactions": txs,
+            "accounts": accounts,
+        }
+    }))
 }

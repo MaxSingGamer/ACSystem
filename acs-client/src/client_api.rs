@@ -1,5 +1,5 @@
 //! 与中心的账户/交易交互：开立、提交 outbox、待确认查询、确认/拒绝。
-//! 复用镜像 apikey 认证；开立上传公钥，提交携带签名交易，确认用接收方私钥签名。
+//! 认证：client 凭 ed25519 签名与公钥，不依赖 apikey。
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
@@ -17,9 +17,6 @@ fn base(w: &Wallet) -> Result<String> {
 /// 开立账户：导出钱包公钥并上传到中心。
 pub fn open_account(w: &Wallet) -> Result<serde_json::Value> {
     let url = base(w)?;
-    if w.info.mirror_apikey.is_empty() {
-        return Err(anyhow!("尚未配置镜像 apikey"));
-    }
     let fp = w
         .fingerprint(&w.info.uid)
         .ok_or_else(|| anyhow!("未找到钱包密钥"))?;
@@ -28,7 +25,6 @@ pub fn open_account(w: &Wallet) -> Result<serde_json::Value> {
         .export_public_key(&fp)
         .map_err(|e| anyhow!("导出公钥失败：{e}"))?;
     let body = json!({
-        "apikey": w.info.mirror_apikey,
         "uid": w.info.uid,
         "type": w.info.atype.as_str(),
         "email": w.info.email,
@@ -52,9 +48,6 @@ pub fn open_account(w: &Wallet) -> Result<serde_json::Value> {
 /// 返回 (提交数, 各 tx_id 结果)。
 pub fn submit_outbox(w: &Wallet, tx_id: Option<&str>) -> Result<Vec<(String, String)>> {
     let url = base(w)?;
-    if w.info.mirror_apikey.is_empty() {
-        return Err(anyhow!("尚未配置镜像 apikey"));
-    }
     let mut stmt = w
         .conn
         .prepare("SELECT tx_id, tx_json FROM outbox WHERE state='Pending' ORDER BY created_at")
@@ -84,7 +77,7 @@ pub fn submit_outbox(w: &Wallet, tx_id: Option<&str>) -> Result<Vec<(String, Str
                 continue;
             }
         };
-        let body = json!({ "apikey": w.info.mirror_apikey, "tx": tx });
+        let body = json!({ "tx": tx });
         match ureq::post(&format!("{url}/api/client/submit"))
             .set("Content-Type", "application/json")
             .timeout(std::time::Duration::from_secs(15))
@@ -129,8 +122,7 @@ pub struct PendingTx {
 pub fn list_pending(w: &Wallet) -> Result<Vec<PendingTx>> {
     let url = base(w)?;
     let resp = ureq::get(&format!(
-        "{url}/api/client/pending?apikey={}&uid={}&type={}",
-        w.info.mirror_apikey,
+        "{url}/api/client/pending?uid={}&type={}",
         w.info.uid,
         w.info.atype.as_str()
     ))
@@ -171,7 +163,6 @@ pub fn confirm_tx(
         .sign_detached(&fp, passphrase, tx_id.as_bytes())
         .map_err(|e| anyhow!("签名失败（口令可能不正确）：{e}"))?;
     let mut body = serde_json::Map::new();
-    body.insert("apikey".into(), json!(w.info.mirror_apikey));
     body.insert("tx_id".into(), json!(tx_id));
     body.insert("receiver_sig".into(), json!(sig));
     if let Some(r) = reject_reason {

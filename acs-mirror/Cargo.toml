@@ -1,6 +1,6 @@
 [package]
 name = "acs-mirror"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 description = "A€（Alpha Coin）只读镜像：拉取中心账本快照并对内提供只读查询"
 license = "MIT"
