@@ -1,11 +1,27 @@
-//! 中心镜像同步：通过只读 apikey 拉取增量交易与账户快照，写入本地。
+//! 中心镜像同步：向中心请求镜像列表，自动测速选最快端点拉取增量交易与账户快照，写入本地。
 //!
 //! 信任模型：中心 > 本地 > 镜像。镜像快照带 sha256 哈希，若本地存有中心公钥可校验签名。
+
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Result};
 use rusqlite::params;
 
 use crate::wallet::Wallet;
+
+/// 共享 ureq Agent：显式启用 native-tls（ureq 的快捷调用不会自动用 native-tls，
+/// 必须在 AgentBuilder 上配置 tls_connector，否则 HTTPS 请求报 "no TLS backend"）。
+pub fn shared_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        let connector = native_tls::TlsConnector::builder()
+            .build()
+            .expect("初始化 TLS 连接器失败");
+        ureq::AgentBuilder::new()
+            .tls_connector(Arc::new(connector))
+            .build()
+    })
+}
 
 /// 同步结果（自动选择最快镜像/中心）。
 #[derive(Debug, Default)]
@@ -29,7 +45,7 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
 
     // 1) 候选端点：中心自身 + 社区镜像列表
     let mut candidates: Vec<String> = vec![server.to_string()];
-    if let Ok(resp) = ureq::get(&format!("{server}/api/mirror/list"))
+    if let Ok(resp) = shared_agent().get(&format!("{server}/api/mirror/list"))
         .timeout(std::time::Duration::from_secs(5))
         .call()
     {
@@ -47,25 +63,29 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
         }
     }
 
-    // 2) ping 各候选 /api/status，选延迟最低者
+    // 2) ping 各候选 /api/status，选延迟最低者；记录失败原因便于诊断
     let mut best: Option<(String, std::time::Duration)> = None;
+    let mut failures: Vec<String> = Vec::new();
     for base in &candidates {
         let t0 = std::time::Instant::now();
-        let ok = ureq::get(&format!("{base}/api/status"))
-            .timeout(std::time::Duration::from_secs(3))
+        match shared_agent().get(&format!("{base}/api/status"))
+            .timeout(std::time::Duration::from_secs(8))
             .call()
-            .is_ok();
-        let dt = t0.elapsed();
-        if ok && best.as_ref().map_or(true, |(_, d)| dt < *d) {
-            best = Some((base.clone(), dt));
+        {
+            Ok(_) => {
+                let dt = t0.elapsed();
+                if best.as_ref().map_or(true, |(_, d)| dt < *d) {
+                    best = Some((base.clone(), dt));
+                }
+            }
+            Err(e) => failures.push(format!("{base} → {e}")),
         }
     }
     let (chosen, _lat) = best.ok_or_else(|| {
         anyhow!(
-            "无法连接任何候选端点（中心 {}，社区镜像 {}）：{}。请检查中心地址是否带 https、frp 隧道是否启动并绑定该域名、网络是否可达。",
-            server,
-            candidates.len().saturating_sub(1),
-            candidates.join("、")
+            "无法连接任何候选端点（共 {}）：{}. 请检查中心地址/证书/网络。",
+            candidates.len(),
+            failures.join("；")
         )
     })?;
 
@@ -74,7 +94,7 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
         .conn
         .query_row("SELECT COALESCE(MAX(ts),0) FROM local_ledger", [], |r| r.get(0))
         .unwrap_or(0);
-    let resp = ureq::get(&format!("{chosen}/api/sync?since={since}"))
+    let resp = shared_agent().get(&format!("{chosen}/api/sync?since={since}"))
         .timeout(std::time::Duration::from_secs(15))
         .call()
         .map_err(|e| anyhow!("连接 {chosen} 失败：{e}"))?;

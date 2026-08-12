@@ -4,6 +4,7 @@
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
+use crate::sync::shared_agent;
 use crate::wallet::Wallet;
 
 fn base(w: &Wallet) -> Result<String> {
@@ -30,7 +31,7 @@ pub fn open_account(w: &Wallet) -> Result<serde_json::Value> {
         "email": w.info.email,
         "pubkey": pubkey,
     });
-    match ureq::post(&format!("{url}/api/client/open"))
+    match shared_agent().post(&format!("{url}/api/client/open"))
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(15))
         .send_json(body)
@@ -78,7 +79,7 @@ pub fn submit_outbox(w: &Wallet, tx_id: Option<&str>) -> Result<Vec<(String, Str
             }
         };
         let body = json!({ "tx": tx });
-        match ureq::post(&format!("{url}/api/client/submit"))
+        match shared_agent().post(&format!("{url}/api/client/submit"))
             .set("Content-Type", "application/json")
             .timeout(std::time::Duration::from_secs(15))
             .send_json(body)
@@ -121,7 +122,7 @@ pub struct PendingTx {
 
 pub fn list_pending(w: &Wallet) -> Result<Vec<PendingTx>> {
     let url = base(w)?;
-    let resp = ureq::get(&format!(
+    let resp = shared_agent().get(&format!(
         "{url}/api/client/pending?uid={}&type={}",
         w.info.uid,
         w.info.atype.as_str()
@@ -169,7 +170,7 @@ pub fn confirm_tx(
         body.insert("reject_reason".into(), json!(r));
     }
     let path = if reject_reason.is_some() { "reject" } else { "confirm" };
-    match ureq::post(&format!("{url}/api/client/{path}"))
+    match shared_agent().post(&format!("{url}/api/client/{path}"))
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(15))
         .send_json(serde_json::Value::Object(body))

@@ -4,13 +4,14 @@ version = 4
 
 [[package]]
 name = "acs-client"
-version = "1.1.2"
+version = "1.1.3"
 dependencies = [
  "acs-core",
  "anyhow",
  "chrono",
  "clap",
  "crossterm",
+ "native-tls",
  "ratatui",
  "rusqlite",
  "serde",
@@ -21,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "acs-core"
-version = "1.1.2"
+version = "1.1.3"
 dependencies = [
  "chrono",
  "hex",
@@ -35,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "acs-mirror"
-version = "1.1.2"
+version = "1.1.3"
 dependencies = [
  "acs-core",
  "anyhow",
@@ -52,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "acs-server"
-version = "1.1.2"
+version = "1.1.3"
 dependencies = [
  "acs-core",
  "aes-gcm",
