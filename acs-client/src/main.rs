@@ -109,17 +109,32 @@ fn run_tui() -> Result<()> {
         app.refresh_view();
     }
     let mut terminal = ratatui::init();
+    // 启用鼠标捕获（点击菜单/按钮）
+    crossterm::execute!(std::io::stdout(), event::EnableMouseCapture)
+        .map_err(|e| anyhow!("启用鼠标失败：{e}"))?;
     let res = event_loop(&mut terminal, &mut app);
+    let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
     ratatui::restore();
     res.map_err(|e| anyhow!("终端错误：{e}"))
 }
 
 fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     while app.running {
+        app.tick();
+        let size = terminal.size()?;
+        app.collect_hits(size);
         terminal.draw(|f| ui::draw(f, app))?;
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(k) = event::read()? {
-                app.handle_key(k);
+            match event::read()? {
+                Event::Key(k) => app.handle_key(k),
+                Event::Mouse(m) => {
+                    if m.kind
+                        == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                    {
+                        app.handle_mouse(m.column, m.row);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -282,7 +297,9 @@ fn cmd_open() -> Result<()> {
         println!("钱包尚未初始化。先创建钱包。");
         return Ok(());
     }
-    let r = client_api::open_account(&w)?;
+    // 加密私钥取本地缓存；CLI 模式无密码，不启用登录取回（password_hash 留空）
+    let sek = w.encrypted_seckey().unwrap_or_default();
+    let r = client_api::open_account(&w, &sek, "")?;
     println!("账户开立完成：{uid} · {ty}（余额 {bal} A€）",
         uid = r.get("uid").and_then(|v| v.as_str()).unwrap_or(""),
         ty = r.get("type").and_then(|v| v.as_str()).unwrap_or(""),

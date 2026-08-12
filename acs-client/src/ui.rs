@@ -39,8 +39,172 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     match app.mode {
         Mode::Onboarding => draw_onboard(frame, app),
+        Mode::Login => draw_login(frame, app),
         Mode::Main => draw_main(frame, app),
     }
+    draw_popup(frame, app);
+}
+
+// ---------------- 弹窗提醒 ----------------
+fn draw_popup(frame: &mut Frame, app: &App) {
+    let Some(p) = &app.popup else { return };
+    let area = frame.area();
+    let w = area.width.min(64).saturating_sub(4).max(30);
+    let h = area.height.saturating_sub(2).min(12).max(6);
+    let box_area = Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(ACCENT2)),
+            Span::styled(
+                p.title.clone(),
+                Style::default().fg(FG).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+    let lines: Vec<Line> = p
+        .msg
+        .lines()
+        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(FG))))
+        .collect();
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(para, inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "Enter / Esc 关闭",
+            Style::default().fg(MUT),
+        )]))
+        .alignment(Alignment::Center),
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
+
+// ---------------- 登录（多账户） ----------------
+fn draw_login(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    let w = area.width.min(72).saturating_sub(2).max(30);
+    let h = area.height.min(24).saturating_sub(2).max(10);
+    let box_area = Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(ACCENT2)),
+            Span::styled(
+                "Alpha Wallet · 选择账户登录",
+                Style::default().fg(FG).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if app.login.accounts.is_empty() {
+        lines.push(line_center(
+            Span::styled("尚未创建任何账户", Style::default().fg(MUT)),
+            inner.width,
+        ));
+        lines.push(Line::default());
+        lines.push(line_center(
+            Span::styled(
+                "[Enter] 注册新账户",
+                Style::default()
+                    .fg(ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            inner.width,
+        ));
+    } else {
+        lines.push(section("本地账户", inner.width));
+        for (i, (uid, t, has_cache, last)) in app.login.accounts.iter().enumerate() {
+            let selected = i == app.login.sel && app.login.sel < app.login.accounts.len();
+            let mark = if selected { "› " } else { "  " };
+            let last_s = if *last > 0 {
+                format!("最近登录 {}", ts(*last))
+            } else {
+                "从未登录".to_string()
+            };
+            let tag = if *has_cache {
+                format!("（本地密钥 · {last_s}）")
+            } else {
+                format!("（需联网取回 · {last_s}）")
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    mark,
+                    Style::default().fg(if selected { ACCENT } else { MUT }),
+                ),
+                Span::styled(
+                    format!("{uid}  [{t}]"),
+                    Style::default()
+                        .fg(if selected { ACCENT } else { FG })
+                        .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+                Span::styled(tag, Style::default().fg(MUT)),
+            ]));
+        }
+        // 新账户按钮
+        let is_new = app.login.sel >= app.login.accounts.len();
+        let mark = if is_new { "› " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(mark, Style::default().fg(if is_new { ACCENT } else { MUT })),
+            Span::styled(
+                "＋ 注册新账户",
+                Style::default()
+                    .fg(if is_new { ACCENT } else { FG })
+                    .add_modifier(if is_new { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+        ]));
+        lines.push(Line::default());
+        lines.push(field_label(
+            "密码",
+            "≥8 位",
+            app.login.sel < app.login.accounts.len(),
+        ));
+        let shown = if app.login.show_pass {
+            &app.login.password
+        } else {
+            &mask(&app.login.password)
+        };
+        lines.push(value_line(shown, app.login.sel < app.login.accounts.len()));
+    }
+    if let Some(e) = &app.login.error {
+        lines.push(Line::default());
+        lines.push(line_center(
+            Span::styled(
+                format!("✗ {e}"),
+                Style::default().fg(ERR).add_modifier(Modifier::BOLD),
+            ),
+            inner.width,
+        ));
+    }
+    lines.push(Line::default());
+    lines.push(hint(
+        "↑↓ 选择 · Enter 登录/注册 · Tab 显示密码 · Esc 退出",
+        inner.width,
+    ));
+
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(p, inner);
 }
 
 // ---------------- 引导 ----------------
@@ -243,16 +407,43 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
         .title(Span::styled(format!(" {} ", app.view.title()), Style::default().fg(ACCENT)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // 鼠标操作按钮行（固定位置，点击触发：Sync/Submit/Send/Help/Quit）
+    let labels = [" [1]Sync ", " [2]Submit ", " [3]Send ", " [4]Help ", " [5]Quit "];
+    let btn_line: Vec<Span> = labels
+        .iter()
+        .map(|l| {
+            Span::styled(
+                l.to_string(),
+                Style::default().fg(MUT).add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(Line::from(btn_line)),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+    );
+    // 内容区下移一行给按钮行
+    let content_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
     if app.help_visible {
-        draw_help_panel(frame, inner);
+        draw_help_panel(frame, content_area);
         return;
     }
     match app.view {
-        View::Overview => draw_overview(frame, app, inner),
-        View::Transactions => draw_transactions(frame, app, inner),
-        View::Accounts => draw_accounts(frame, app, inner),
-        View::Outbox => draw_outbox(frame, app, inner),
-        View::Settings => draw_settings(frame, app, inner),
+        View::Overview => draw_overview(frame, app, content_area),
+        View::Transactions => draw_transactions(frame, app, content_area),
+        View::Accounts => draw_accounts(frame, app, content_area),
+        View::Outbox => draw_outbox(frame, app, content_area),
+        View::Settings => draw_settings(frame, app, content_area),
     }
 }
 

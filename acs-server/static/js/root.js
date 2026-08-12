@@ -90,7 +90,7 @@ async function adminDel(id) { if (!confirm(`确定删除该管理员？`)) retur
 async function loadKeyStatus() {
   const d = await api('/api/admin/keys/status');
   $('keyStatus').innerHTML = `
-    <div class="kv-row"><span>密钥</span><b>${d.exists ? '已生成（gpg ed25519）' : '未生成'}</b></div>
+    <div class="kv-row"><span>密钥</span><b>${d.exists ? '已生成' : '未生成'}</b></div>
     <div class="kv-row"><span>解锁状态</span><b><span class="tag ${d.unlocked ? 'active' : 'locked'}">${d.unlocked ? '已解锁（可签名铸造）' : '已锁定'}</span></b></div>`;
 }
 

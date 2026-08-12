@@ -4,6 +4,8 @@
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
+use acs_core::models::AccountType;
+
 use crate::sync::shared_agent;
 use crate::wallet::Wallet;
 
@@ -15,8 +17,12 @@ fn base(w: &Wallet) -> Result<String> {
     Ok(url.to_string())
 }
 
-/// 开立账户：导出钱包公钥并上传到中心。
-pub fn open_account(w: &Wallet) -> Result<serde_json::Value> {
+/// 开立账户：导出钱包公钥，连同密码加密私钥与密码哈希上传到中心（支持多设备登录）。
+pub fn open_account(
+    w: &Wallet,
+    encrypted_seckey: &str,
+    password_hash: &str,
+) -> Result<serde_json::Value> {
     let url = base(w)?;
     let fp = w
         .fingerprint(&w.info.uid)
@@ -30,8 +36,37 @@ pub fn open_account(w: &Wallet) -> Result<serde_json::Value> {
         "type": w.info.atype.as_str(),
         "email": w.info.email,
         "pubkey": pubkey,
+        "encrypted_seckey": encrypted_seckey,
+        "password_hash": password_hash,
     });
     match shared_agent().post(&format!("{url}/api/client/open"))
+        .set("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send_json(body)
+    {
+        Ok(resp) => Ok(resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?),
+        Err(ureq::Error::Status(code, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+        }
+        Err(e) => Err(anyhow!("连接失败：{e}")),
+    }
+}
+
+/// 登录：向中心请求取回加密私钥（服务端校验密码哈希后返回），供本机导入或跨设备恢复。
+pub fn fetch_key(
+    w: &Wallet,
+    uid: &str,
+    atype: AccountType,
+    password: &str,
+) -> Result<serde_json::Value> {
+    let url = base(w)?;
+    let body = json!({
+        "uid": uid,
+        "type": atype.as_str(),
+        "password": password,
+    });
+    match shared_agent().post(&format!("{url}/api/client/fetch-key"))
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(15))
         .send_json(body)

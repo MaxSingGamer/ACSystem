@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS mirror_accounts(
 CREATE TABLE IF NOT EXISTS outbox(
     tx_id TEXT PRIMARY KEY, tx_json TEXT NOT NULL, created_at INTEGER NOT NULL,
     state TEXT NOT NULL DEFAULT 'Pending');  -- Pending | Submitted | Failed
+-- 本地已登录账户清单（多账户；encrypted_seckey 为密码加密私钥缓存，空=需联网取回）
+CREATE TABLE IF NOT EXISTS local_accounts(
+    uid TEXT NOT NULL, type TEXT NOT NULL,
+    email TEXT NOT NULL, encrypted_seckey TEXT NOT NULL DEFAULT '',
+    server_url TEXT NOT NULL DEFAULT '', last_login INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(uid, type));
 "#;
 
 /// 钱包元信息（meta 表）。
@@ -58,6 +64,16 @@ impl WalletInfo {
     pub fn initialized(&self) -> bool {
         !self.uid.is_empty()
     }
+}
+
+/// 本地已登录账户（多账户清单中的一项）。
+#[derive(Debug, Clone)]
+pub struct LocalAccount {
+    pub uid: String,
+    pub atype: AccountType,
+    pub email: String,
+    pub encrypted_seckey: String, // 密码加密私钥缓存（可能为空）
+    pub last_login: i64,
 }
 
 /// 本地钱包存储。
@@ -184,6 +200,93 @@ impl Wallet {
                 |r| r.get(0),
             )
             .unwrap_or(0)
+    }
+
+    // ---- 多账户 ----
+
+    /// 列出本地已登录账户（多账户清单，最近登录优先）。
+    pub fn list_local_accounts(&self) -> Vec<LocalAccount> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT uid, type, email, encrypted_seckey, last_login \
+                 FROM local_accounts ORDER BY last_login DESC",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                let t: String = r.get(1)?;
+                Ok(LocalAccount {
+                    uid: r.get(0)?,
+                    atype: AccountType::from_str(&t).unwrap_or(AccountType::Individual),
+                    email: r.get(2)?,
+                    encrypted_seckey: r.get(3)?,
+                    last_login: r.get(4)?,
+                })
+            })
+            .unwrap();
+        rows.flatten().collect()
+    }
+
+    /// 按 uid 查询本地账户（任一类型）。
+    pub fn local_account(&self, uid: &str) -> Option<LocalAccount> {
+        self.list_local_accounts().into_iter().find(|a| a.uid == uid)
+    }
+
+    /// 当前钱包的加密私钥缓存（keys 表，注册时写入）。
+    pub fn encrypted_seckey(&self) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT encrypted_seckey FROM keys WHERE uid=?1 ORDER BY rowid DESC LIMIT 1",
+                params![self.info.uid],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+
+    /// 保存/更新本地账户（注册或取回后）。
+    pub fn save_local_account(
+        &self,
+        uid: &str,
+        atype: AccountType,
+        email: &str,
+        encrypted_seckey: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO local_accounts(uid, type, email, encrypted_seckey, server_url, last_login) \
+             VALUES(?1,?2,?3,?4,?5,?6) \
+             ON CONFLICT(uid,type) DO UPDATE SET email=excluded.email, \
+               encrypted_seckey=excluded.encrypted_seckey, server_url=excluded.server_url",
+            params![
+                uid,
+                atype.as_str(),
+                email,
+                encrypted_seckey,
+                self.info.server_url,
+                chrono::Utc::now().timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 切换到指定账户（更新当前登录元信息；密钥已导入 gpg homedir，互不干扰）。
+    pub fn switch_account(&mut self, uid: &str) -> Result<()> {
+        let acc = self
+            .local_account(uid)
+            .ok_or_else(|| anyhow!("本地无账户 {uid}"))?;
+        for (k, v) in [
+            ("wallet_uid", acc.uid.clone()),
+            ("wallet_type", acc.atype.as_str().to_string()),
+            ("wallet_email", acc.email.clone()),
+        ] {
+            meta_set(&self.conn, k, &v)?;
+        }
+        self.conn.execute(
+            "UPDATE local_accounts SET last_login=?2 WHERE uid=?1",
+            params![uid, chrono::Utc::now().timestamp()],
+        )?;
+        self.info = load_info(&self.conn);
+        Ok(())
     }
 }
 

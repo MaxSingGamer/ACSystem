@@ -29,6 +29,13 @@ CREATE TABLE IF NOT EXISTS member_companies(
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'Active');
 
+-- 客户端账户登录凭证（密码哈希，用于登录取回加密私钥；客户端注册时写入）
+CREATE TABLE IF NOT EXISTS account_credentials(
+    uid TEXT NOT NULL,
+    type TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    PRIMARY KEY(uid, type));
+
 -- 账本账户分表（无 abbr；UID 为唯一识别符）
 CREATE TABLE IF NOT EXISTS accounts_country(
     uid TEXT PRIMARY KEY, email TEXT NOT NULL,

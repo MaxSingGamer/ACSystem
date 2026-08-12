@@ -1,7 +1,10 @@
 //! TUI 应用状态机：首次引导（Onboarding） + 主界面（Overview/Tx/Accounts/Settings）。
 //! 操作逻辑参考 OpenCode：顶部状态栏、分区导航、底部命令输入栏、常驻快捷键帮助。
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Rect, Size};
 
 use acs_core::models::AccountType;
 
@@ -14,6 +17,7 @@ use crate::wallet::Wallet;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Onboarding,
+    Login,
     Main,
 }
 
@@ -113,6 +117,54 @@ impl Default for Onboard {
     }
 }
 
+/// 登录屏（多账户选择 + 密码）。
+pub struct Login {
+    /// (uid, type, 有本地密钥缓存, 最近登录时间戳)
+    pub accounts: Vec<(String, String, bool, i64)>,
+    pub sel: usize,
+    pub password: String,
+    pub show_pass: bool,
+    pub error: Option<String>,
+    pub busy: bool,
+}
+
+impl Default for Login {
+    fn default() -> Self {
+        Login {
+            accounts: Vec::new(),
+            sel: 0,
+            password: String::new(),
+            show_pass: false,
+            error: None,
+            busy: false,
+        }
+    }
+}
+
+/// 弹窗式状态提醒（自动换行，Esc/Enter 关闭或数秒后消失）。
+pub struct Popup {
+    pub title: String,
+    pub msg: String,
+    pub created: Instant,
+}
+
+/// 鼠标点击命中目标。
+#[derive(Clone, Debug)]
+pub enum HitTarget {
+    Nav(usize),     // 左侧导航菜单第 i 项
+    Button(String), // 内容区操作按钮
+}
+
+/// 可点击区域（与 UI 渲染布局保持一致）。
+#[derive(Clone, Debug)]
+pub struct HitArea {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub target: HitTarget,
+}
+
 /// 待提交的转账意图（口令输入完成后执行）。
 struct PendingSend {
     receiver: String,
@@ -139,28 +191,174 @@ pub struct App {
     pub accounts: Vec<(String, String, i64, String)>,
 
     pub onboard: Onboard,
+    pub login: Login,
+    pub popup: Option<Popup>,
+    pub hits: Vec<HitArea>,
     pub running: bool,
 }
 
 impl App {
     pub fn new(wallet: Wallet) -> App {
         let initialized = wallet.info.initialized();
+        let accounts = wallet
+            .list_local_accounts()
+            .into_iter()
+            .map(|a| {
+                (
+                    a.uid,
+                    a.atype.as_str().to_string(),
+                    !a.encrypted_seckey.is_empty(),
+                    a.last_login,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mode = if initialized {
+            Mode::Main
+        } else if !accounts.is_empty() {
+            Mode::Login
+        } else {
+            Mode::Onboarding
+        };
+        let status = if initialized {
+            "钱包已就绪"
+        } else if !accounts.is_empty() {
+            "请选择账户登录"
+        } else {
+            "首次使用，请完成注册"
+        };
         App {
-            mode: if initialized { Mode::Main } else { Mode::Onboarding },
+            mode,
             view: View::Overview,
             input_mode: InputMode::None,
             input: String::new(),
             pending_send: None,
             pending_confirm: None,
-            status: if initialized { "钱包已就绪".into() } else { "首次使用，请完成引导".into() },
+            status: status.into(),
             help_visible: false,
             sync_res: None,
             txs: Vec::new(),
             outbox: Vec::new(),
             accounts: Vec::new(),
             onboard: Onboard::default(),
+            login: Login {
+                accounts,
+                ..Default::default()
+            },
+            popup: None,
+            hits: Vec::new(),
             running: true,
             wallet,
+        }
+    }
+
+    /// 每次绘制前收集可点击区域（与 ui.rs 布局保持一致）。
+    pub fn collect_hits(&mut self, size: Size) {
+        self.hits.clear();
+        if self.mode != Mode::Main {
+            return;
+        }
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: size.width,
+            height: size.height,
+        };
+        let body_y = area.y + 3; // 顶部状态栏高 3
+        // 左侧导航菜单（宽 14，5 个视图项）
+        for i in 0..View::ALL.len() {
+            let y = body_y + i as u16;
+            if y < area.y + area.height {
+                self.hits.push(HitArea {
+                    x: area.x,
+                    y,
+                    w: 14,
+                    h: 1,
+                    target: HitTarget::Nav(i),
+                });
+            }
+        }
+        // 内容区顶部操作按钮行（nav 宽 14 + 内容左边框 1）
+        let content_x = area.x + 14 + 1;
+        let btn_y = body_y + 1;
+        let btn_labels = ["Sync", "Submit", "Send", "Help", "Quit"];
+        for (i, b) in btn_labels.iter().enumerate() {
+            self.hits.push(HitArea {
+                x: content_x + i as u16 * 8,
+                y: btn_y,
+                w: 8,
+                h: 1,
+                target: HitTarget::Button(b.to_string()),
+            });
+        }
+    }
+
+    /// 处理鼠标左键点击（坐标命中测试）。
+    pub fn handle_mouse(&mut self, x: u16, y: u16) {
+        // 弹窗打开：任意点击关闭
+        if self.popup.is_some() {
+            self.popup = None;
+            return;
+        }
+        for hit in &self.hits {
+            if x >= hit.x && x < hit.x + hit.w && y >= hit.y && y < hit.y + hit.h {
+                match &hit.target {
+                    HitTarget::Nav(i) => {
+                        self.view = View::ALL[*i];
+                        self.refresh_view();
+                    }
+                    HitTarget::Button(b) => match b.as_str() {
+                        "Sync" => self.do_sync(),
+                        "Submit" => self.run_submit(),
+                        "Send" => self.begin_send_input(),
+                        "Help" => self.help_visible = !self.help_visible,
+                        "Quit" => self.quit(),
+                        _ => {}
+                    },
+                }
+                return;
+            }
+        }
+    }
+
+    /// 提交全部待提交交易（鼠标菜单按钮）。
+    pub fn run_submit(&mut self) {
+        match client_api::submit_outbox(&self.wallet, None) {
+            Ok(results) if results.is_empty() => {
+                self.notify("提交", "outbox 中没有待提交交易");
+            }
+            Ok(results) => {
+                let summary: Vec<String> = results.iter().map(|(_, s)| s.clone()).collect();
+                self.notify(
+                    "提交完成",
+                    &format!("共提交 {} 笔\n{}", results.len(), summary.join("\n")),
+                );
+                self.load_outbox();
+            }
+            Err(e) => self.notify("提交失败", &e.to_string()),
+        }
+    }
+
+    /// 转账按钮：预填 send 命令，用户补全接收方与金额。
+    pub fn begin_send_input(&mut self) {
+        self.input = "send ".to_string();
+        self.input_mode = InputMode::Command;
+    }
+
+    /// 弹窗式状态提醒（自动换行；Esc 关闭或 5 秒后消失）。
+    pub fn notify(&mut self, title: &str, msg: &str) {
+        self.popup = Some(Popup {
+            title: title.to_string(),
+            msg: msg.to_string(),
+            created: Instant::now(),
+        });
+    }
+
+    /// 每帧调用：弹窗超时自动关闭。
+    pub fn tick(&mut self) {
+        if let Some(p) = &self.popup {
+            if p.created.elapsed() > Duration::from_secs(5) {
+                self.popup = None;
+            }
         }
     }
 
@@ -205,20 +403,21 @@ impl App {
         match sync::pull(&self.wallet) {
             Ok(r) => {
                 let src = r.source.clone();
-                let _ = self
-                    .wallet
-                    .mark_synced(r.server_time, None);
+                let _ = self.wallet.mark_synced(r.server_time, None);
                 self.sync_res = Some(r);
-                self.status = format!(
-                    "已同步（{src}）：新增交易 {}，账户快照 {}",
-                    self.sync_res.as_ref().map(|s| s.txs).unwrap_or(0),
-                    self.sync_res.as_ref().map(|s| s.accounts).unwrap_or(0)
+                let n_tx = self.sync_res.as_ref().map(|s| s.txs).unwrap_or(0);
+                let n_acc = self.sync_res.as_ref().map(|s| s.accounts).unwrap_or(0);
+                self.status = format!("已同步（{src}）");
+                self.notify(
+                    "同步完成",
+                    &format!("已同步（{src}）\n新增交易 {n_tx}，账户快照 {n_acc}"),
                 );
                 self.load_txs();
                 self.load_accounts();
             }
             Err(e) => {
                 self.status = format!("同步失败：{e}");
+                self.notify("同步失败", &e.to_string());
             }
         }
     }
@@ -252,11 +451,14 @@ impl App {
                 &pass,
             ) {
                 Ok((tx_id, tx_hash)) => {
-                    self.status = format!("已签名入 outbox：{tx_id}（hash {:.12}…）", tx_hash);
+                    self.notify(
+                        "转账成功",
+                        &format!("已签名入 outbox：{tx_id}\nhash {tx_hash:.12}…"),
+                    );
                     self.load_outbox();
                 }
                 Err(e) => {
-                    self.status = format!("转账失败：{e}");
+                    self.notify("转账失败", &e.to_string());
                 }
             }
             return;
@@ -268,10 +470,10 @@ impl App {
             match client_api::confirm_tx(&self.wallet, &tid, &pass, None) {
                 Ok(r) => {
                     let st = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    self.status = format!("交易 {:.8}… 状态 → {st}", tid);
+                    self.notify("确认结果", &format!("交易 {:.8}… 状态 → {st}", tid));
                 }
                 Err(e) => {
-                    self.status = format!("确认失败：{e}");
+                    self.notify("确认失败", &e.to_string());
                 }
             }
             return;
@@ -297,12 +499,22 @@ impl App {
         }
         match self.mode {
             Mode::Onboarding => self.handle_onboard(key),
+            Mode::Login => self.handle_login(key),
             Mode::Main => self.handle_main(key),
         }
     }
 
     // ---- 主界面 ----
     fn handle_main(&mut self, key: KeyEvent) {
+        // 弹窗打开时：Esc/Enter/空格 关闭，q 退出，其余忽略
+        if self.popup.is_some() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => self.popup = None,
+                KeyCode::Char('q') => self.quit(),
+                _ => {}
+            }
+            return;
+        }
         match self.input_mode {
             InputMode::None => self.main_nav(key),
             InputMode::Command => self.handle_input(key, false),
@@ -418,7 +630,8 @@ impl App {
                 self.status = format!("本账户余额（镜像口径）：{} A€", txn::balance(&self.wallet));
             }
             Some("open") => {
-                match client_api::open_account(&self.wallet) {
+                let sek = self.wallet.encrypted_seckey().unwrap_or_default();
+                match client_api::open_account(&self.wallet, &sek, "") {
                     Ok(r) => {
                         let uid = r.get("uid").and_then(|v| v.as_str()).unwrap_or("");
                         let bal = r.get("balance").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -435,7 +648,10 @@ impl App {
                     }
                     Ok(results) => {
                         let summary: Vec<String> = results.iter().map(|(_, s)| s.clone()).collect();
-                        self.status = format!("提交完成：{} 笔（{}）", results.len(), summary.join(", "));
+                        self.notify(
+                            "提交完成",
+                            &format!("共提交 {} 笔\n{}", results.len(), summary.join("\n")),
+                        );
                         self.load_outbox();
                     }
                     Err(e) => self.status = format!("提交失败：{e}"),
@@ -667,12 +883,31 @@ impl App {
             .create_key(&uid, &email, &pass)
             .map(|gk| (gk, uid, atype, email));
         match result {
-            Ok((_gk, uid, atype, email)) => {
+            Ok((gk, uid, atype, email)) => {
                 let _ = self.wallet.set_server_url(&self.onboard.server_url);
                 let _ = self.wallet.init_wallet(&uid, atype, &email);
+                // 密码哈希（$salt$sha256，与中心一致），供登录取回校验
+                let salt = uuid::Uuid::new_v4().to_string();
+                let password_hash =
+                    format!("{salt}${}", sha256_hex(format!("{salt}:{pass}").as_bytes()));
+                // 缓存加密私钥到本地账户清单（多账户互不干扰）
+                let _ = self
+                    .wallet
+                    .save_local_account(&uid, atype, &email, &gk.encrypted_seckey);
+                // 上传加密私钥 + 密码哈希到中心（注册即支持跨设备登录）
+                let open_res =
+                    client_api::open_account(&self.wallet, &gk.encrypted_seckey, &password_hash);
                 self.onboard.busy = false;
                 self.onboard.step = OnboardStep::Done;
-                self.status = "引导完成，欢迎使用 Alpha Wallet！按 Enter 进入主界面".into();
+                match open_res {
+                    Ok(_) => {
+                        self.status = "引导完成，账户已在中心登记，按 Enter 进入主界面".into();
+                    }
+                    Err(e) => {
+                        self.status =
+                            format!("引导完成，但中心登记失败：{e}（可稍后在设置重试）");
+                    }
+                }
             }
             Err(e) => {
                 self.onboard.busy = false;
@@ -681,4 +916,135 @@ impl App {
             }
         }
     }
+
+    // ---- 登录（多账户） ----
+    fn handle_login(&mut self, key: KeyEvent) {
+        if self.login.busy {
+            return;
+        }
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.quit(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                let n = self.login.accounts.len() + 1;
+                self.login.sel = (self.login.sel + n - 1) % n;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let n = self.login.accounts.len() + 1;
+                self.login.sel = (self.login.sel + 1) % n;
+            }
+            KeyCode::Tab => self.login.show_pass = !self.login.show_pass,
+            KeyCode::Backspace => {
+                self.login.password.pop();
+                self.login.error = None;
+            }
+            KeyCode::Char(c) => {
+                self.login.password.push(c);
+                self.login.error = None;
+            }
+            KeyCode::Enter => {
+                if self.login.accounts.is_empty() || self.login.sel >= self.login.accounts.len() {
+                    // 注册新账户 → 引导
+                    self.mode = Mode::Onboarding;
+                    self.onboard.step = OnboardStep::Welcome;
+                } else {
+                    self.do_login(self.login.sel);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn do_login(&mut self, idx: usize) {
+        if idx >= self.login.accounts.len() {
+            return;
+        }
+        let (uid, _t, _has_cache, _last) = self.login.accounts[idx].clone();
+        let pass = self.login.password.clone();
+        if pass.len() < 8 {
+            self.login.error = Some("密码至少 8 位".into());
+            return;
+        }
+        self.login.busy = true;
+        self.login.error = None;
+
+        // 1) 本地有加密私钥缓存 → 直接导入并用口令校验
+        if let Some(acc) = self.wallet.local_account(&uid) {
+            if !acc.encrypted_seckey.is_empty()
+                && self.wallet.gpg.import_key(&acc.encrypted_seckey).is_ok()
+                && self
+                    .wallet
+                    .fingerprint(&uid)
+                    .and_then(|fp| self.wallet.gpg.verify_passphrase(&fp, &pass).ok())
+                    .is_some()
+            {
+                self.login_done(&uid);
+                return;
+            }
+        }
+        // 2) 本地无缓存或口令不符 → 向中心取回（服务端校验密码哈希）
+        self.fetch_and_login(&uid, &pass);
+    }
+
+    fn fetch_and_login(&mut self, uid: &str, pass: &str) {
+        let atype = self
+            .wallet
+            .local_account(uid)
+            .map(|a| a.atype)
+            .unwrap_or(AccountType::Individual);
+        match client_api::fetch_key(&self.wallet, uid, atype, pass) {
+            Ok(r) => {
+                let email = r
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let sek = r
+                    .get("encrypted_seckey")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if sek.is_empty() {
+                    self.login.busy = false;
+                    self.login.error =
+                        Some("中心未存有该账户加密私钥（该账户非本客户端注册）".into());
+                    return;
+                }
+                if let Err(e) = self.wallet.gpg.import_key(&sek) {
+                    self.login.busy = false;
+                    self.login.error = Some(format!("导入密钥失败：{e}"));
+                    return;
+                }
+                let _ = self.wallet.save_local_account(uid, atype, &email, &sek);
+                self.login_done(uid);
+            }
+            Err(e) => {
+                self.login.busy = false;
+                self.login.error = Some(format!("登录失败：{e}"));
+            }
+        }
+    }
+
+    fn login_done(&mut self, uid: &str) {
+        let _ = self.wallet.switch_account(uid);
+        self.login.busy = false;
+        self.login.password.clear();
+        self.mode = Mode::Main;
+        self.view = View::Overview;
+        self.refresh_view();
+        self.status = format!("欢迎回来，{uid}");
+        self.notify("登录成功", &format!("欢迎回来，{uid}"));
+    }
+}
+
+/// sha256 十六进制（密码哈希，与中心一致）。
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    let d = h.finalize();
+    let mut s = String::with_capacity(d.len() * 2);
+    for b in d {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }

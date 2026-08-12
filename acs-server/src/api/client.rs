@@ -26,6 +26,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/client/confirm", post(confirm))
         .route("/api/client/reject", post(confirm))
         .route("/api/client/pending", get(pending))
+        .route("/api/client/fetch-key", post(fetch_key))
 }
 
 /// 读取账户公钥（用于验签）。
@@ -44,6 +45,10 @@ pub struct OpenReq {
     pub atype: String,
     pub email: String,
     pub pubkey: String,
+    #[serde(default)]
+    pub encrypted_seckey: String, // 密码加密私钥（登录取回用）
+    #[serde(default)]
+    pub password_hash: String,    // $salt$sha256（客户端注册时上传）
 }
 
 async fn open_account(
@@ -71,7 +76,7 @@ async fn open_account(
         account_type: atype,
         email: req.email.trim().to_string(),
         pubkey: req.pubkey.trim().to_string(),
-        encrypted_seckey: String::new(), // 私钥始终由持有者保管，中心不代存
+        encrypted_seckey: req.encrypted_seckey.trim().to_string(), // 密码加密私钥（登录取回用）
         balance: 0,
         status: AccountStatus::Active,
         last_tx_hash: Some(transaction::account_chain_seed(&req.uid.trim(), atype)),
@@ -79,7 +84,58 @@ async fn open_account(
         changed_at: now,
     };
     account::create_account(&conn, &acc)?;
+    // 存登录凭证（客户端注册时提供密码哈希；供登录取回）
+    if !req.password_hash.trim().is_empty() {
+        conn.execute(
+            "INSERT INTO account_credentials(uid, type, password_hash) VALUES (?1,?2,?3) \
+             ON CONFLICT(uid,type) DO UPDATE SET password_hash=excluded.password_hash",
+            params![acc.uid.clone(), atype.as_str(), req.password_hash.trim()],
+        )
+        .map_err(ApiErr::from_err)?;
+    }
     Ok(Json(json!({ "ok": true, "uid": acc.uid, "type": atype.as_str(), "fingerprint": fp, "balance": 0 })))
+}
+
+// ---------- 登录取回加密私钥 ----------
+
+#[derive(Deserialize)]
+pub struct FetchKeyReq {
+    pub uid: String,
+    #[serde(rename = "type", default = "default_type")]
+    pub atype: String,
+    pub password: String,
+}
+
+/// 客户端登录：验证密码哈希，返回加密私钥与账户信息（供本机缓存或跨设备恢复）。
+async fn fetch_key(
+    State(st): State<AppState>,
+    Json(req): Json<FetchKeyReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let atype = AccountType::from_str(&req.atype)
+        .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+    let conn = st.db.lock().unwrap();
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT password_hash FROM account_credentials WHERE uid=?1 AND type=?2",
+            params![req.uid, atype.as_str()],
+            |r| r.get(0),
+        )
+        .ok();
+    let stored = stored.ok_or_else(|| ApiErr::not_found("该账户未设置登录凭证（需客户端注册时开启）"))?;
+    let (salt, hash) = stored.split_once('$').unwrap_or(("", &stored));
+    if crate::auth::hash_password(&req.password, salt) != hash {
+        return Err(ApiErr::forbidden("密码错误"));
+    }
+    let acc = account::get_account(&conn, &req.uid, atype)?
+        .ok_or_else(|| ApiErr::not_found("账户不存在"))?;
+    Ok(Json(json!({
+        "ok": true,
+        "uid": acc.uid,
+        "type": atype.as_str(),
+        "email": acc.email,
+        "pubkey": acc.pubkey,
+        "encrypted_seckey": acc.encrypted_seckey,
+    })))
 }
 
 // ---------- 提交交易 ----------
