@@ -142,15 +142,16 @@ function renderAuth(){
   const body = $('auth-body');
   if(state.logged_in){ $('auth').classList.add('hidden'); $('layout').classList.remove('hidden'); render(); return; }
   $('auth').classList.remove('hidden'); $('layout').classList.add('hidden');
-  // 第一步：配置中心服务器（未配置时）
+  // 第一步：未配置中心服务器 → 先配置（留空默认 acsystem.maxshin.top）
   if(!state.server_url){
-    body.innerHTML = '<p class="muted" style="text-align:center;padding:2px 0 8px;">首次使用，请先配置中心服务器</p>'
-      + '<label>中心服务器地址</label>'
-      + '<input id="auth-server" placeholder="留空使用默认 https://alphaces.maxshin.top">'
-      + '<div class="btns"><button class="btn" id="auth-server-save">保存并继续</button></div>';
-    $('auth-server-save').onclick = async () => {
-      const raw = ($('auth-server').value || '').trim();
-      const url = raw || 'https://alphaces.maxshin.top';
+    body.innerHTML = `
+      <p class="muted" style="text-align:center;margin-bottom:12px;">第一步 · 配置中心服务器</p>
+      <label>中心服务器地址</label>
+      <input id="auth-server" placeholder="https://acsystem.maxshin.top">
+      <div class="muted" style="font-size:12px;margin:6px 0 2px;">留空则使用默认：https://acsystem.maxshin.top</div>
+      <div class="btns"><button class="btn" id="auth-saveserver">保存并继续</button></div>`;
+    $('auth-saveserver').onclick = async () => {
+      const url = ($('auth-server').value || '').trim() || 'https://acsystem.maxshin.top';
       const r = await api('/api/set-server', { url });
       if(r.ok){ await refresh(); } else { $('auth-err').textContent = r.message; }
     };

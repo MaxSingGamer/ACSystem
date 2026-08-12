@@ -31,6 +31,9 @@ pub struct AppState {
 
 pub type SharedState = Arc<AppState>;
 
+/// 默认中心服务器地址（未配置时使用）。
+pub const DEFAULT_SERVER: &str = "https://acsystem.maxshin.top";
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -94,6 +97,13 @@ async fn index() -> Html<&'static str> {
 
 fn lock(st: &SharedState) -> std::sync::MutexGuard<'_, Wallet> {
     st.wallet.lock().unwrap()
+}
+
+/// 未配置中心时使用默认地址。
+fn ensure_server(w: &mut Wallet) {
+    if w.info.server_url.trim().is_empty() {
+        let _ = w.set_server_url(DEFAULT_SERVER);
+    }
 }
 
 fn ok(msg: &str) -> Json<Value> {
@@ -192,6 +202,7 @@ async fn login(
     Json(req): Json<LoginReq>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut w = lock(&st);
+    ensure_server(&mut w);
     match login_account(&mut w, &req.uid, &req.password) {
         Ok(uid) => Ok(ok(&format!("欢迎回来，{uid}"))),
         Err(e) => Err(err(&e.to_string())),
@@ -244,6 +255,7 @@ async fn register(
         return Err(err("请填写 UID 与邮箱，口令至少 8 位"));
     }
     let mut w = lock(&st);
+    ensure_server(&mut w);
     match register_account(&mut w, req.server_url.trim(), &req.uid, atype, &req.email, &req.password)
     {
         Ok(_) => Ok(ok("注册成功，账户已在中心登记")),
@@ -259,7 +271,10 @@ fn register_account(
     email: &str,
     pass: &str,
 ) -> anyhow::Result<()> {
-    w.set_server_url(server_url)?;
+    // 注册表单提供了地址则覆盖；否则沿用默认
+    if !server_url.trim().is_empty() {
+        w.set_server_url(server_url)?;
+    }
     let gk = w.create_key(uid, email, pass)?;
     w.init_wallet(uid, atype, email)?;
     let salt = uuid::Uuid::new_v4().to_string();
@@ -279,6 +294,7 @@ async fn sync_ep(
     State(st): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut w = lock(&st);
+    ensure_server(&mut w);
     match sync::pull(&w) {
         Ok(r) => {
             let _ = w.mark_synced(r.server_time, None);
@@ -297,7 +313,8 @@ async fn transfer(
     State(st): State<SharedState>,
     Json(req): Json<TransferReq>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let w = lock(&st);
+    let mut w = lock(&st);
+    ensure_server(&mut w);
     let mut r = req.to.trim().to_string();
     let mut rtype = AccountType::Individual;
     if let Some(i) = r.find('@') {
@@ -325,7 +342,8 @@ async fn confirm(
     State(st): State<SharedState>,
     Json(req): Json<PassReq>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let w = lock(&st);
+    let mut w = lock(&st);
+    ensure_server(&mut w);
     let tid = client_api::list_pending(&w)
         .ok()
         .and_then(|l| l.into_iter().next().map(|p| p.tx_id));
@@ -345,7 +363,8 @@ async fn confirm(
 async fn submit(
     State(st): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let w = lock(&st);
+    let mut w = lock(&st);
+    ensure_server(&mut w);
     match client_api::submit_outbox(&w, None) {
         Ok(res) if res.is_empty() => Ok(Json(json!({ "ok": true, "message": "outbox 中没有待提交交易" }))),
         Ok(res) => {
