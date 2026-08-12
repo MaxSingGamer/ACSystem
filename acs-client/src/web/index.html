@@ -144,23 +144,21 @@ function renderAuth(){
   $('auth').classList.remove('hidden'); $('layout').classList.add('hidden');
   const logins = state.logins || [];
   let html = '';
-  if(logins.length === 0){
-    html = '<p class="muted" style="text-align:center;padding:8px 0 4px;">还没有账户，请先注册</p>';
-    html += '<div class="btns"><button class="btn" id="auth-register">注册新账户</button></div>';
-    body.innerHTML = html;
-    $('auth-register').onclick = () => openModal('register', {});
-    $('auth-err').textContent = '';
-    return;
+  if(logins.length > 0){
+    html = '<div class="muted" style="margin-bottom:8px;">选择已有账户：</div>';
+    logins.forEach(a => {
+      const act = selectedUid === a.uid ? 'active' : '';
+      const tag = a.has_key ? '本地密钥' : '需联网取回';
+      html += `<div class="acc-item ${act}" data-uid="${esc(a.uid)}">
+        <div class="t">${esc(a.uid)} <span class="muted">[${esc(a.type)}]</span></div>
+        <div class="d">${tag} · 最近登录 ${fmtTs(a.last_login)}</div>
+      </div>`;
+    });
+    html += '<div class="muted" style="margin:12px 0 5px;">或登录其他设备注册的账户：</div>';
+  } else {
+    html = '<p class="muted" style="text-align:center;padding:2px 0 8px;">输入你的账户登录（可在其他电脑注册后在此登录，自动取回密钥）</p>';
   }
-  html = '<div class="muted" style="margin-bottom:8px;">选择账户：</div>';
-  logins.forEach(a => {
-    const act = selectedUid === a.uid ? 'active' : '';
-    const tag = a.has_key ? '本地密钥' : '需联网取回';
-    html += `<div class="acc-item ${act}" data-uid="${esc(a.uid)}">
-      <div class="t">${esc(a.uid)} <span class="muted">[${esc(a.type)}]</span></div>
-      <div class="d">${tag} · 最近登录 ${fmtTs(a.last_login)}</div>
-    </div>`;
-  });
+  html += '<label>账户 UID</label><input id="auth-uid" value="' + esc(selectedUid || '') + '" placeholder="如 Steve">';
   html += '<label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">';
   html += '<div class="btns">';
   html += '<button class="btn" id="auth-login">登录</button>';
@@ -170,12 +168,12 @@ function renderAuth(){
   body.querySelectorAll('.acc-item').forEach(el => {
     el.onclick = () => { selectedUid = el.dataset.uid; renderAuth(); };
   });
-  const lp = $('auth-login');
-  if(lp) lp.onclick = async () => {
-    const uid = selectedUid || (logins[0] && logins[0].uid);
+  $('auth-login').onclick = async () => {
+    const uid = ($('auth-uid').value || '').trim();
     const pass = $('auth-pass').value;
-    if(!uid){ $('auth-err').textContent = '请选择账户'; return; }
-    const r = await api('/api/login', { uid, password:pass });
+    if(!uid){ $('auth-err').textContent = '请输入账户 UID'; return; }
+    if(pass.length < 8){ $('auth-err').textContent = '密码至少 8 位'; return; }
+    const r = await api('/api/login', { uid, password: pass });
     if(r.ok){ await refresh(); toast(r.message); } else { $('auth-err').textContent = r.message; }
   };
   $('auth-register').onclick = () => openModal('register', {});
