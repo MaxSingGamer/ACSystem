@@ -121,8 +121,9 @@ let selectedUid = null;
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtTs(t){ if(!t) return '从未'; const d = new Date(t*1000); return d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
 
-async function api(path, body){
-  const opt = { method: body ? 'POST' : 'GET', headers:{'Content-Type':'application/json'} };
+async function api(path, body, method){
+  const m = method || (body ? 'POST' : 'GET');
+  const opt = { method: m, headers:{'Content-Type':'application/json'} };
   if(body) opt.body = JSON.stringify(body);
   const r = await fetch(path, opt);
   return r.json();
@@ -197,7 +198,7 @@ function renderTop(){
 }
 
 const MENU = [
-  ['home','首页'], ['accounts','我的账户'], ['txs','交易记录'],
+  ['home','首页'], ['accounts','账户信息'], ['txs','交易记录'],
   ['outbox','待提交'], ['settings','设置']
 ];
 const ACTIONS = {
@@ -244,12 +245,16 @@ function renderHome(){
 }
 
 function renderAccounts(){
-  if(!state.accounts || state.accounts.length===0) return '<div class="card muted">尚无账户快照。点击「同步」后可见中心账户。</div>';
-  const rows = state.accounts.map(a => {
-    const mark = a[0]===state.uid ? '◉ ' : ' ';
-    return `<tr><td>${mark}${esc(a[0])}</td><td>${esc(a[1])}</td><td>${a[2]} A€</td><td>${esc(a[3])}</td></tr>`;
-  }).join('');
-  return `<div class="card"><h2>中心账户</h2><table><tr><th>UID</th><th>类型</th><th>余额</th><th>状态</th></tr>${rows}</table></div>`;
+  return `<div class="card"><h2>我的账户信息</h2>
+    <table>
+      <tr><th>UID</th><td>${esc(state.uid)}</td></tr>
+      <tr><th>账户类型</th><td>${esc(state.atype)}</td></tr>
+      <tr><th>邮箱</th><td>${esc(state.email)}</td></tr>
+      <tr><th>余额（中心口径）</th><td>${state.balance} A€</td></tr>
+      <tr><th>中心服务器</th><td>${esc(state.server_url || '未配置')}</td></tr>
+      <tr><th>最近同步</th><td>${state.synced_at ? fmtTs(state.synced_at) : '从未'}</td></tr>
+    </table>
+  </div>`;
 }
 
 function renderTxs(){
@@ -276,14 +281,14 @@ function renderSettings(){
 }
 
 async function runAction(act){
-  if(act==='sync'){ const r = await api('/api/sync'); toast(r.message||'同步完成', !r.ok); await refresh(); }
+  if(act==='sync'){ const r = await api('/api/sync', null, 'POST'); toast(r.message||'同步完成', !r.ok); await refresh(); }
   else if(act==='transfer') openModal('transfer', {});
   else if(act==='confirm') openModal('confirm', {});
-  else if(act==='submit'){ const r = await api('/api/submit'); toast(r.message||'提交完成', !r.ok); await refresh(); }
+  else if(act==='submit'){ const r = await api('/api/submit', null, 'POST'); toast(r.message||'提交完成', !r.ok); await refresh(); }
   else if(act==='refresh') await refresh();
   else if(act==='register') openModal('register', {});
   else if(act==='setserver') openModal('setserver', { url: state.server_url });
-  else if(act==='switch' || act==='logout'){ await api('/api/logout'); await refresh(); }
+  else if(act==='switch' || act==='logout'){ await api('/api/logout', null, 'POST'); await refresh(); }
 }
 
 // ---------- 模态弹窗 ----------
@@ -331,8 +336,8 @@ function openModal(kind, data){
 function closeModal(){ $('modal-wrap').classList.add('hidden'); }
 
 // ---------- 顶部按钮 ----------
-$('btn-sync').onclick = async () => { const r = await api('/api/sync'); toast(r.message||'同步完成', !r.ok); await refresh(); };
-$('btn-logout').onclick = async () => { await api('/api/logout'); await refresh(); };
+$('btn-sync').onclick = async () => { const r = await api('/api/sync', null, 'POST'); toast(r.message||'同步完成', !r.ok); await refresh(); };
+$('btn-logout').onclick = async () => { await api('/api/logout', null, 'POST'); await refresh(); };
 $('btn-quit').onclick = () => quitApp();
 async function quitApp(){ try{ await fetch('/api/quit', {method:'POST'}); }catch(e){} setTimeout(()=>{ document.body.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e">已退出。</div>'; }, 300); }
 

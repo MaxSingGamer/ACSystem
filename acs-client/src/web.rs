@@ -151,21 +151,7 @@ struct UrlReq {
 async fn state_ep(State(st): State<SharedState>) -> Json<Value> {
     let w = lock(&st);
     let logged_in = w.info.initialized();
-    let mut accounts = Vec::new();
-    if let Ok(mut stmt) = w.conn.prepare(
-        "SELECT uid,type,balance,status FROM mirror_accounts ORDER BY synced_at DESC, uid",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        }) {
-            accounts = rows.flatten().collect();
-        }
-    }
+    // 不向客户端暴露全部账本账户快照（仅返回本账户相关数据）
     let txs = txn::list_local_tx(&w, 200);
     let outbox = txn::list_outbox(&w);
     let logins: Vec<Value> = w
@@ -188,7 +174,6 @@ async fn state_ep(State(st): State<SharedState>) -> Json<Value> {
         "server_url": w.info.server_url,
         "synced_at": w.info.synced_at,
         "balance": w.mirror_balance(),
-        "accounts": accounts,
         "txs": txs,
         "outbox": outbox,
         "logins": logins,
