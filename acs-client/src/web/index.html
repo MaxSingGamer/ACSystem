@@ -155,6 +155,7 @@ function renderAuth(){
       const r = await api('/api/set-server', { url });
       if(r.ok){ await refresh(); } else { $('auth-err').textContent = r.message; }
     };
+    $('auth-server').focus();
     $('auth-err').textContent = '';
     return;
   }
@@ -184,6 +185,9 @@ function renderAuth(){
   body.querySelectorAll('.acc-item').forEach(el => {
     el.onclick = () => { selectedUid = el.dataset.uid; renderAuth(); };
   });
+  // 有账户且未选中时默认选中第一个，并聚焦密码框（光标随点击移动）
+  if(logins.length > 0 && !selectedUid){ selectedUid = logins[0].uid; renderAuth(); return; }
+  $('auth-pass').focus();
   $('auth-login').onclick = async () => {
     const uid = ($('auth-uid').value || '').trim();
     const pass = $('auth-pass').value;
@@ -329,6 +333,9 @@ function openModal(kind, data){
   $('modal-title').textContent = kind==='transfer'?'转账':(kind==='confirm'?'确认收款':(kind==='setserver'?'设置中心地址':'注册新账户'));
   body.innerHTML = html;
   $('modal-wrap').classList.remove('hidden');
+  // 弹窗打开自动聚焦首个输入框
+  const firstInput = body.querySelector('input,select');
+  if(firstInput) firstInput.focus();
   const ok = $('modal-ok'), cancel = $('modal-cancel');
   ok.onclick = async () => {
     if(kind==='transfer'){
