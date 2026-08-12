@@ -140,6 +140,7 @@ pub fn list_outbox(w: &Wallet) -> Vec<(String, String, i64)> {
 }
 
 /// 供 UI 展示用的本地余额口径：镜像快照余额。
+#[allow(dead_code)] // 旧 TUI 使用，Web 版用 wallet::mirror_balance
 pub fn balance(w: &Wallet) -> i64 {
     w.mirror_balance()
 }

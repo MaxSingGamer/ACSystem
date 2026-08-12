@@ -1,29 +1,24 @@
-//! acs-client：A€（Alpha Coin）钱包客户端。
+//! acs-client：A€（Alpha Coin）钱包客户端（本地 Web GUI）。
 //!
-//! - 默认进入 TUI（参考 OpenCode：顶部状态栏 / 导航 / 底部命令栏 / 常驻帮助）
-//! - 首次启动检测 → 引导（Onboarding）
-//! - 非交互子命令：`status` / `sync` / `new`（便于脚本与测试）
+//! - 默认启动本地 Web 服务并自动打开浏览器（网页关闭后自动退出进程）
+//! - 首次使用在网页内完成注册引导
+//! - 非交互子命令：`status` / `sync` / `new` / `open` / `send` / `submit` / `confirm`（便于脚本与测试）
 
-mod app;
 mod client_api;
 mod sync;
 mod txn;
-mod ui;
 mod wallet;
+mod web;
 
 use std::io;
-use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event};
-use ratatui::DefaultTerminal;
 
-use crate::app::App;
 use crate::wallet::Wallet;
 
 #[derive(Parser)]
-#[command(name = "acs-client", version, about = "A€（Alpha Coin）钱包客户端 —— CLI / TUI")]
+#[command(name = "acs-client", version, about = "A€（Alpha Coin）钱包客户端 —— Web GUI / CLI")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -84,7 +79,8 @@ enum Cmd {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Some(Cmd::Status) => cmd_status(),
@@ -97,48 +93,36 @@ fn main() -> Result<()> {
         Some(Cmd::Submit { tx_id }) => cmd_submit(tx_id.as_deref()),
         Some(Cmd::Confirm { tx_id, pass, reject }) => cmd_confirm(tx_id.as_deref(), &pass, reject.as_deref()),
         Some(Cmd::Config { server, apikey }) => cmd_config(server.as_deref(), apikey.as_deref()),
-        None => run_tui(),
+        None => run_web().await,
     }
 }
 
-/// TUI 主循环。
-fn run_tui() -> Result<()> {
+/// 启动本地 Web GUI：绑定 127.0.0.1，自动打开浏览器；网页关闭（心跳超时）自动退出。
+async fn run_web() -> Result<()> {
     let wallet = Wallet::open()?;
-    let mut app = App::new(wallet);
-    if app.mode == app::Mode::Main {
-        app.refresh_view();
-    }
-    let mut terminal = ratatui::init();
-    // 启用鼠标捕获（点击菜单/按钮）
-    crossterm::execute!(std::io::stdout(), event::EnableMouseCapture)
-        .map_err(|e| anyhow!("启用鼠标失败：{e}"))?;
-    let res = event_loop(&mut terminal, &mut app);
-    let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
-    ratatui::restore();
-    res.map_err(|e| anyhow!("终端错误：{e}"))
+    let (router, state) = web::build(wallet);
+    let port = 9580;
+    let url = format!("http://127.0.0.1:{port}");
+    open_browser(&url);
+    web::heartbeat_watch(state);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| anyhow!("启动本地服务失败（端口 {port} 可能被占用）：{e}"))?;
+    println!("A€ 钱包已启动：{url}（浏览器已打开，关闭网页后自动退出）");
+    axum::serve(listener, router)
+        .await
+        .map_err(|e| anyhow!("本地服务异常：{e}"))?;
+    Ok(())
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
-    while app.running {
-        app.tick();
-        let size = terminal.size()?;
-        app.collect_hits(size);
-        terminal.draw(|f| ui::draw(f, app))?;
-        if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(k) => app.handle_key(k),
-                Event::Mouse(m) => {
-                    if m.kind
-                        == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
-                    {
-                        app.handle_mouse(m.column, m.row);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
+/// 打开系统默认浏览器。
+fn open_browser(url: &str) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .spawn();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 // ---------------- 非交互子命令 ----------------

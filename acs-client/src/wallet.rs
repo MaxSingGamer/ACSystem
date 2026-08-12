@@ -269,6 +269,15 @@ impl Wallet {
         Ok(())
     }
 
+    /// 登出：清除当前登录账户（回到登录/选择界面）。
+    pub fn clear_current(&mut self) -> Result<()> {
+        meta_set(&self.conn, "wallet_uid", "")?;
+        meta_set(&self.conn, "wallet_type", "")?;
+        meta_set(&self.conn, "wallet_email", "")?;
+        self.info = load_info(&self.conn);
+        Ok(())
+    }
+
     /// 切换到指定账户（更新当前登录元信息；密钥已导入 gpg homedir，互不干扰）。
     pub fn switch_account(&mut self, uid: &str) -> Result<()> {
         let acc = self

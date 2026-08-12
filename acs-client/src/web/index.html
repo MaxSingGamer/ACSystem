@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A€ 钱包</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --border:#30363d;
+    --fg:#e6edf3; --mut:#8b949e; --acc:#58a6ff; --acc2:#79c0ff;
+    --ok:#3fb950; --warn:#d29922; --err:#f85149;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--fg); font-family:"Microsoft YaHei",system-ui,sans-serif; font-size:14px;}
+  .hidden{display:none !important;}
+  /* 顶部状态栏 */
+  #topbar{display:flex; align-items:center; gap:16px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--border);}
+  #topbar .logo{font-weight:bold; font-size:15px;}
+  #topbar .acc{color:var(--acc);}
+  #topbar .right{margin-left:auto; color:var(--mut); display:flex; gap:16px; align-items:center;}
+  #topbar .synced{color:var(--mut);}
+  #topbar button{background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:5px 12px; cursor:pointer;}
+  #topbar button:hover{background:#242d3a;}
+  /* 布局 */
+  #layout{display:flex; min-height:calc(100vh - 53px);}
+  #nav{width:150px; background:var(--panel); border-right:1px solid var(--border); padding:10px 0;}
+  #nav .item{padding:10px 18px; cursor:pointer; color:var(--mut);}
+  #nav .item:hover{background:var(--panel2); color:var(--fg);}
+  #nav .item.active{background:var(--panel2); color:var(--acc); font-weight:bold; border-left:3px solid var(--acc);}
+  #main{flex:1; padding:16px;}
+  /* 内容 */
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:12px;}
+  .card h2{font-size:15px; color:var(--acc); margin-bottom:10px;}
+  .bar{display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;}
+  .btn{background:var(--acc); color:#0d1117; border:none; border-radius:6px; padding:7px 14px; font-size:13px; cursor:pointer; font-weight:bold;}
+  .btn:hover{filter:brightness(1.1);}
+  .btn.ghost{background:var(--panel2); color:var(--fg); border:1px solid var(--border); font-weight:normal;}
+  .btn.danger{background:var(--err); color:#fff;}
+  .btn.ok{background:var(--ok); color:#0d1117;}
+  table{width:100%; border-collapse:collapse;}
+  th,td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--border);}
+  th{color:var(--mut); font-weight:normal;}
+  .muted{color:var(--mut);}
+  .balance{font-size:26px; font-weight:bold;}
+  .balance span{color:var(--acc); font-size:15px;}
+  .status{color:var(--ok);}
+  .status.warn{color:var(--warn);}
+  /* 弹窗 */
+  #modal-wrap{position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:50;}
+  #modal{width:420px; max-width:92vw; max-height:88vh; overflow-y:auto; background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px;}
+  #modal h3{margin-bottom:14px; color:var(--acc);}
+  #modal .field{margin-bottom:12px;}
+  #modal label{display:block; color:var(--mut); margin-bottom:5px;}
+  #modal input,#modal select{width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:8px 10px;}
+  #modal input:focus{outline:none; border-color:var(--acc);}
+  #modal .row{display:flex; gap:8px; justify-content:flex-end; margin-top:16px;}
+  #modal .error{color:var(--err); margin-top:8px; font-size:13px;}
+  /* 登录/注册 */
+  #auth{max-width:440px; margin:60px auto; background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:26px;}
+  #auth h1{font-size:18px; margin-bottom:18px; text-align:center;}
+  #auth h1 span{color:var(--acc);}
+  #auth .acc-item{padding:10px 12px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; cursor:pointer;}
+  #auth .acc-item.active{border-color:var(--acc); background:var(--panel2);}
+  #auth .acc-item .t{font-weight:bold;}
+  #auth .acc-item .d{color:var(--mut); font-size:12px; margin-top:3px;}
+  #auth label{display:block; color:var(--mut); margin:12px 0 5px;}
+  #auth input{width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:9px 11px;}
+  #auth .err{color:var(--err); margin-top:8px; min-height:18px;}
+  #auth .btns{display:flex; gap:8px; margin-top:14px;}
+  #auth .btns .btn{flex:1;}
+  .msgbox{position:fixed; top:70px; left:50%; transform:translateX(-50%); background:var(--panel2); border:1px solid var(--acc); color:var(--fg); padding:10px 18px; border-radius:8px; z-index:99; box-shadow:0 4px 20px rgba(0,0,0,.4);}
+  .msgbox.err{border-color:var(--err);}
+</style>
+</head>
+<body>
+<div id="topbar">
+  <div class="logo">● A€ <span class="acc">钱包</span> <span class="muted" id="ver"></span></div>
+  <div class="muted" id="user"></div>
+  <div class="right">
+    <span class="synced" id="syncstate"></span>
+    <button id="btn-sync" class="hidden">同步</button>
+    <button id="btn-logout" class="hidden">退出登录</button>
+    <button id="btn-quit">退出程序</button>
+  </div>
+</div>
+
+<div id="layout" class="hidden">
+  <div id="nav"></div>
+  <div id="main"></div>
+</div>
+
+<!-- 登录 / 注册 -->
+<div id="auth">
+  <h1>● A€ <span>钱包登录</span></h1>
+  <div id="auth-body"></div>
+  <div class="err" id="auth-err"></div>
+</div>
+
+<!-- 模态弹窗 -->
+<div id="modal-wrap" class="hidden">
+  <div id="modal">
+    <h3 id="modal-title"></h3>
+    <div id="modal-body"></div>
+    <div class="error" id="modal-error"></div>
+    <div class="row">
+      <button class="btn ghost" id="modal-cancel">取消</button>
+      <button class="btn ok" id="modal-ok">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="msgbox" class="hidden"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const V = '1.3.0';
+let state = { logged_in:false };
+let view = 'home';
+let selectedUid = null;
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtTs(t){ if(!t) return '从未'; const d = new Date(t*1000); return d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+
+async function api(path, body){
+  const opt = { method: body ? 'POST' : 'GET', headers:{'Content-Type':'application/json'} };
+  if(body) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+function toast(msg, isErr){
+  const m = $('msgbox');
+  m.textContent = msg;
+  m.className = 'msgbox' + (isErr ? ' err' : '');
+  clearTimeout(m._t);
+  m._t = setTimeout(()=> m.classList.add('hidden'), 4000);
+}
+
+// ---------- 渲染 ----------
+function renderAuth(){
+  const body = $('auth-body');
+  if(state.logged_in){ $('auth').classList.add('hidden'); $('layout').classList.remove('hidden'); render(); return; }
+  $('auth').classList.remove('hidden'); $('layout').classList.add('hidden');
+  const logins = state.logins || [];
+  let html = '';
+  if(logins.length === 0){
+    html = '<p class="muted" style="text-align:center;padding:8px 0 4px;">还没有账户，请先注册</p>';
+    html += '<div class="btns"><button class="btn" id="auth-register">注册新账户</button></div>';
+    body.innerHTML = html;
+    $('auth-register').onclick = () => openModal('register', {});
+    $('auth-err').textContent = '';
+    return;
+  }
+  html = '<div class="muted" style="margin-bottom:8px;">选择账户：</div>';
+  logins.forEach(a => {
+    const act = selectedUid === a.uid ? 'active' : '';
+    const tag = a.has_key ? '本地密钥' : '需联网取回';
+    html += `<div class="acc-item ${act}" data-uid="${esc(a.uid)}">
+      <div class="t">${esc(a.uid)} <span class="muted">[${esc(a.type)}]</span></div>
+      <div class="d">${tag} · 最近登录 ${fmtTs(a.last_login)}</div>
+    </div>`;
+  });
+  html += '<label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">';
+  html += '<div class="btns">';
+  html += '<button class="btn" id="auth-login">登录</button>';
+  html += '<button class="btn ghost" id="auth-register">注册新账户</button>';
+  html += '</div>';
+  body.innerHTML = html;
+  body.querySelectorAll('.acc-item').forEach(el => {
+    el.onclick = () => { selectedUid = el.dataset.uid; renderAuth(); };
+  });
+  const lp = $('auth-login');
+  if(lp) lp.onclick = async () => {
+    const uid = selectedUid || (logins[0] && logins[0].uid);
+    const pass = $('auth-pass').value;
+    if(!uid){ $('auth-err').textContent = '请选择账户'; return; }
+    const r = await api('/api/login', { uid, password:pass });
+    if(r.ok){ await refresh(); toast(r.message); } else { $('auth-err').textContent = r.message; }
+  };
+  $('auth-register').onclick = () => openModal('register', {});
+  $('auth-err').textContent = '';
+}
+
+function render(){
+  renderTop();
+  renderNav();
+  renderMain();
+}
+
+function renderTop(){
+  $('ver').textContent = 'v' + V;
+  const u = state.logged_in ? `${state.uid} · ${state.atype}` : '';
+  $('user').textContent = u;
+  $('syncstate').textContent = state.logged_in ? (state.synced_at ? `已同步 ${fmtTs(state.synced_at)}` : '未同步') : '';
+  $('btn-sync').classList.toggle('hidden', !state.logged_in);
+  $('btn-logout').classList.toggle('hidden', !state.logged_in);
+}
+
+const MENU = [
+  ['home','首页'], ['accounts','我的账户'], ['txs','交易记录'],
+  ['outbox','待提交'], ['settings','设置']
+];
+const ACTIONS = {
+  home: [['sync','同步'],['transfer','转账'],['refresh','刷新']],
+  accounts: [['sync','同步'],['switch','切换账户'],['register','注册新账户']],
+  txs: [['transfer','转账'],['confirm','确认收款'],['submit','提交待确认']],
+  outbox: [['submit','全部提交'],['refresh','刷新']],
+  settings: [['setserver','中心地址'],['logout','返回登录']]
+};
+
+function renderNav(){
+  const nav = $('nav');
+  nav.innerHTML = MENU.map(([k,label]) =>
+    `<div class="item ${k===view?'active':''}" data-view="${k}">${label}</div>`
+  ).join('') + `<div class="item" id="nav-quit">退出程序</div>`;
+  nav.querySelectorAll('.item[data-view]').forEach(el => {
+    el.onclick = () => { view = el.dataset.view; renderMain(); };
+  });
+  $('nav-quit').onclick = () => quitApp();
+}
+
+function renderMain(){
+  const main = $('main');
+  const actions = (ACTIONS[view] || []).map(([id,label]) =>
+    `<button class="btn ghost" data-act="${id}">${label}</button>`).join('');
+  const actionsBar = `<div class="bar">${actions}</div>`;
+  let content = '';
+  if(view === 'home') content = renderHome();
+  else if(view === 'accounts') content = renderAccounts();
+  else if(view === 'txs') content = renderTxs();
+  else if(view === 'outbox') content = renderOutbox();
+  else if(view === 'settings') content = renderSettings();
+  main.innerHTML = actionsBar + content;
+  main.querySelectorAll('button[data-act]').forEach(b => {
+    b.onclick = () => runAction(b.dataset.act);
+  });
+}
+
+function renderHome(){
+  return `<div class="card"><h2>账户余额（中心口径）</h2>
+    <div class="balance">${state.balance} <span>A€</span></div>
+    <p class="muted" style="margin-top:12px;">UID：${esc(state.uid)}<br>类型：${esc(state.atype)}<br>邮箱：${esc(state.email)}<br>中心：${esc(state.server_url || '未配置')}</p>
+  </div>`;
+}
+
+function renderAccounts(){
+  if(!state.accounts || state.accounts.length===0) return '<div class="card muted">尚无账户快照。点击「同步」后可见中心账户。</div>';
+  const rows = state.accounts.map(a => {
+    const mark = a[0]===state.uid ? '◉ ' : ' ';
+    return `<tr><td>${mark}${esc(a[0])}</td><td>${esc(a[1])}</td><td>${a[2]} A€</td><td>${esc(a[3])}</td></tr>`;
+  }).join('');
+  return `<div class="card"><h2>中心账户</h2><table><tr><th>UID</th><th>类型</th><th>余额</th><th>状态</th></tr>${rows}</table></div>`;
+}
+
+function renderTxs(){
+  if(!state.txs || state.txs.length===0) return '<div class="card muted">暂无交易。同步后可见。</div>';
+  const rows = state.txs.map(t => {
+    const [id,type,peer,,amount,ts,status] = t;
+    const cls = status==='Confirmed'?'status':(status==='Rejected'?'status warn':'status warn');
+    return `<tr><td>${fmtTs(ts)}</td><td>${esc(type)}</td><td>${esc(peer)}</td><td>${amount}</td><td class="${cls}">${esc(status)}</td></tr>`;
+  }).join('');
+  return `<div class="card"><h2>交易记录</h2><table><tr><th>时间</th><th>类型</th><th>对方</th><th>金额</th><th>状态</th></tr>${rows}</table></div>`;
+}
+
+function renderOutbox(){
+  if(!state.outbox || state.outbox.length===0) return '<div class="card muted">待提交列表为空。</div>';
+  const rows = state.outbox.map(o => `<tr><td>${esc(o[0])}</td><td>${esc(o[1])}</td><td>${o[2]} A€</td></tr>`).join('');
+  return `<div class="card"><h2>待提交（本地签名，未入账）</h2><table><tr><th>交易 ID</th><th>接收方</th><th>金额</th></tr>${rows}</table></div>`;
+}
+
+function renderSettings(){
+  return `<div class="card"><h2>设置</h2>
+    <p class="muted">中心服务器：${esc(state.server_url || '未配置')}</p>
+    <p class="muted" style="margin-top:8px;">数据目录：${esc(state.server_url ? '~/.alpha_dir/acs-client' : '~/.alpha_dir/acs-client')}</p>
+  </div>`;
+}
+
+async function runAction(act){
+  if(act==='sync'){ const r = await api('/api/sync'); toast(r.message||'同步完成', !r.ok); await refresh(); }
+  else if(act==='transfer') openModal('transfer', {});
+  else if(act==='confirm') openModal('confirm', {});
+  else if(act==='submit'){ const r = await api('/api/submit'); toast(r.message||'提交完成', !r.ok); await refresh(); }
+  else if(act==='refresh') await refresh();
+  else if(act==='register') openModal('register', {});
+  else if(act==='setserver') openModal('setserver', { url: state.server_url });
+  else if(act==='switch' || act==='logout'){ await api('/api/logout'); await refresh(); }
+}
+
+// ---------- 模态弹窗 ----------
+function openModal(kind, data){
+  const title = $('modal-title'), body = $('modal-body'), err = $('modal-error');
+  err.textContent = '';
+  let html = '';
+  if(kind==='transfer'){
+    html = `<div class="field"><label>接收方 UID（可带 @类型）</label><input id="f-to" placeholder="如 Steve 或 AlphaEU@System"></div>
+      <div class="field"><label>金额（A€）</label><input id="f-amt" type="number" min="1" placeholder="0"></div>
+      <div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
+  } else if(kind==='confirm'){
+    html = `<div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>
+      <p class="muted">将确认接收方收到的第一笔待确认交易。</p>`;
+  } else if(kind==='setserver'){
+    html = `<div class="field"><label>中心地址</label><input id="f-url" placeholder="https://acsystem.maxshin.top" value="${esc(data.url||'')}"></div>`;
+  } else if(kind==='register'){
+    html = `<div class="field"><label>中心服务器地址</label><input id="r-server" placeholder="https://acsystem.maxshin.top"></div>
+      <div class="field"><label>UID（唯一识别符）</label><input id="r-uid" placeholder="如 Steve"></div>
+      <div class="field"><label>账户类型</label><select id="r-type"><option value="Individual">个人账户</option><option value="Bank">银行账户</option><option value="Country">国家账户</option></select></div>
+      <div class="field"><label>邮箱</label><input id="r-email" placeholder="如 Steve@maxshin.top"></div>
+      <div class="field"><label>口令（≥8 位，用于签名与登录取回）</label><input id="r-pass" type="password"></div>`;
+  }
+  $('modal-title').textContent = kind==='transfer'?'转账':(kind==='confirm'?'确认收款':(kind==='setserver'?'设置中心地址':'注册新账户'));
+  body.innerHTML = html;
+  $('modal-wrap').classList.remove('hidden');
+  const ok = $('modal-ok'), cancel = $('modal-cancel');
+  ok.onclick = async () => {
+    if(kind==='transfer'){
+      const r = await api('/api/transfer', { to:$('f-to').value, amount:parseInt($('f-amt').value||'0'), password:$('f-pass').value });
+      if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent = r.message;
+    } else if(kind==='confirm'){
+      const r = await api('/api/confirm', { password:$('f-pass').value });
+      if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent = r.message;
+    } else if(kind==='setserver'){
+      const r = await api('/api/set-server', { url:$('f-url').value });
+      if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent = r.message;
+    } else if(kind==='register'){
+      const r = await api('/api/register', { server_url:$('r-server').value, uid:$('r-uid').value, type:$('r-type').value, email:$('r-email').value, password:$('r-pass').value });
+      if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent = r.message;
+    }
+  };
+  cancel.onclick = closeModal;
+}
+function closeModal(){ $('modal-wrap').classList.add('hidden'); }
+
+// ---------- 顶部按钮 ----------
+$('btn-sync').onclick = async () => { const r = await api('/api/sync'); toast(r.message||'同步完成', !r.ok); await refresh(); };
+$('btn-logout').onclick = async () => { await api('/api/logout'); await refresh(); };
+$('btn-quit').onclick = () => quitApp();
+async function quitApp(){ try{ await fetch('/api/quit', {method:'POST'}); }catch(e){} setTimeout(()=>{ document.body.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e">已退出。</div>'; }, 300); }
+
+async function refresh(){
+  state = await api('/api/state');
+  renderAuth();
+  if(!state.logged_in) renderAuth();
+}
+function heartbeat(){
+  setInterval(()=>{ try{ fetch('/api/heartbeat',{method:'POST'}); }catch(e){} }, 5000);
+}
+
+$('ver').textContent = 'v' + V;
+heartbeat();
+refresh();
+</script>
+</body>
+</html>
