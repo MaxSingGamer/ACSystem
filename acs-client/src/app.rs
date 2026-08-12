@@ -802,6 +802,7 @@ impl App {
             KeyCode::Char('4') => self.set_view(View::Outbox),
             KeyCode::Char('5') => self.set_view(View::Settings),
             KeyCode::Char('r') | KeyCode::Char('R') => self.do_sync(),
+            KeyCode::Char('t') | KeyCode::Char('T') => self.open_form(FormKind::Transfer),
             KeyCode::Char('h') | KeyCode::Char('H') => self.help_visible = !self.help_visible,
             KeyCode::Esc => self.help_visible = false,
             KeyCode::Enter => self.do_sync(),

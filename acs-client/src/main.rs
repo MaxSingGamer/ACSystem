@@ -239,6 +239,8 @@ fn cmd_new(
         w.set_mirror_apikey(&k)?;
     }
     w.init_wallet(&uid, atype, &email)?;
+    // 写入本地账户清单（TUI 登录屏可见，支持多账户登录 / 跨设备登录取回）
+    let _ = w.save_local_account(&uid, atype, &email, &gk.encrypted_seckey);
     println!("钱包创建完成：{uid} · {}", atype.as_str());
     println!("数据目录：{}", wallet::data_dir_str().display());
     println!("运行 `acs-client` 进入界面，或 `acs-client sync` 同步账本。");

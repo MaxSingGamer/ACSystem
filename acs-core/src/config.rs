@@ -35,9 +35,9 @@ impl CoreConfig {
         PathBuf::from(home).join(".alpha_dir")
     }
 
-    /// 客户端默认配置。
+    /// 客户端默认配置（数据统一存放：~/.alpha_dir/acs-client）。
     pub fn client_default() -> CoreConfig {
-        let dir = Self::default_alpha_dir();
+        let dir = Self::default_alpha_dir().join("acs-client");
         CoreConfig {
             gpg_bin: PathBuf::from("gpg.exe"),
             gpg_homedir: dir.join("gnupg"),

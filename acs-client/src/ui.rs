@@ -618,11 +618,11 @@ fn draw_overview(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![Span::styled("最近同步", Style::default().fg(OK).add_modifier(Modifier::BOLD))]));
         lines.push(Line::from(vec![Span::styled(format!("  新增交易 {} · 账户快照 {} · 快照哈希 {:.16}…", r.txs, r.accounts, r.hash), Style::default().fg(FG))]));
     } else {
-        lines.push(Line::from(vec![Span::styled("尚未同步。按 r 从中心镜像拉取账本。", Style::default().fg(WARN))]));
+        lines.push(Line::from(vec![Span::styled("尚未同步。点击上方「同步」按钮拉取账本。", Style::default().fg(WARN))]));
     }
     lines.push(Line::default());
-    lines.push(Line::from(vec![Span::styled("快捷键：", Style::default().fg(MUT))]));
-    lines.push(Line::from(vec![Span::styled("  r 同步 · t 转账（或输入 send <uid> <金额>）· ↑↓/数字 切视图 · q 退出", Style::default().fg(MUT))]));
+    lines.push(Line::from(vec![Span::styled("鼠标操作：", Style::default().fg(MUT))]));
+    lines.push(Line::from(vec![Span::styled("  点击上方「同步/转账/刷新」按钮 · 点击左侧菜单切换 · 转账/设置弹窗输入 · q 退出", Style::default().fg(MUT))]));
     let p = Paragraph::new(lines).wrap(Wrap { trim: true });
     frame.render_widget(p, area);
 }
@@ -665,7 +665,7 @@ fn draw_transactions(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_accounts(frame: &mut Frame, app: &App, area: Rect) {
     if app.accounts.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled("尚无账户快照。按 r 同步后可见中心账户。", Style::default().fg(MUT))])),
+            Paragraph::new(Line::from(vec![Span::styled("尚无账户快照。点击「同步」后可见中心账户。", Style::default().fg(MUT))])),
             area,
         );
         return;

@@ -296,7 +296,7 @@ fn db_open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// 默认数据目录（~/.alpha_dir），打印用。
+/// 默认客户端数据目录（~/.alpha_dir/acs-client），打印用。
 pub fn data_dir_str() -> PathBuf {
-    CoreConfig::default_alpha_dir()
+    CoreConfig::default_alpha_dir().join("acs-client")
 }
