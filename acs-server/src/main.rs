@@ -26,7 +26,9 @@ use tower_http::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let data_dir = std::env::var("ACS_DATA_DIR").unwrap_or_else(|_| {
+        // 服务器数据统一分类存放：~/.alpha_dir/acs-server
         acs_core::config::CoreConfig::default_alpha_dir()
+            .join("acs-server")
             .to_string_lossy()
             .into_owned()
     });
@@ -132,15 +134,14 @@ fn seed_default_admins(conn: &rusqlite::Connection, gpg: &GpgUtil) -> anyhow::Re
     Ok(())
 }
 
-/// 种子系统账户：PreIssuedAccount / AESystem / AlphaEU（首启自动生成密钥并导出私钥到 ./alpha_dir）。
+/// 种子系统账户：PreIssuedAccount / AESystem / AlphaEU（首启自动生成密钥并导出私钥到数据目录）。
 fn seed_system_accounts(
     conn: &rusqlite::Connection,
     gpg: &GpgUtil,
     cfg: &CoreConfig,
 ) -> anyhow::Result<()> {
-    let alpha_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .join("alpha_dir");
+    // 系统账户私钥统一导出到服务器数据目录（~/.alpha_dir/acs-server）
+    let alpha_dir = cfg.data_dir.clone();
     std::fs::create_dir_all(&alpha_dir)?;
     // 生成主密钥（用于加密系统账户 passphrase 文件）
     let master_key = ensure_master_key(cfg)?;

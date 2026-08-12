@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::app::{App, InputMode, Mode, OnboardStep, View};
+use crate::app::{App, FormKind, Mode, OnboardStep, View};
 
 // ---- OpenCode 风格配色 ----
 const BG: Color = Color::Rgb(13, 17, 23);
@@ -42,7 +42,124 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Login => draw_login(frame, app),
         Mode::Main => draw_main(frame, app),
     }
+    draw_form(frame, app);
     draw_popup(frame, app);
+}
+
+// ---------------- 表单弹窗（全鼠标） ----------------
+fn draw_form(frame: &mut Frame, app: &App) {
+    let Some(f) = &app.form else { return };
+    let area = frame.area();
+    let w = area.width.min(60).saturating_sub(4).max(34);
+    let n = f.fields.len() as u16;
+    let h = n.saturating_add(6).min(area.height.saturating_sub(2).max(10));
+    let box_area = Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, box_area);
+    let title = match f.kind {
+        FormKind::Transfer => "转账",
+        FormKind::Confirm => "确认收款",
+        FormKind::SetServer => "设置中心地址",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Line::from(vec![Span::styled(
+            format!(" {title} "),
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+        )]));
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+
+    let labels: Vec<&str> = match f.kind {
+        FormKind::Transfer => vec!["接收方 UID（可带 @类型）", "金额（A€）", "钱包口令"],
+        FormKind::Confirm => vec!["钱包口令"],
+        FormKind::SetServer => vec!["中心地址（如 https://acs.aeu.org）"],
+    };
+    for (i, label) in labels.iter().enumerate() {
+        let y = inner.y + i as u16;
+        let active = i == f.focus;
+        let value = &f.fields[i];
+        let shown =
+            if (matches!(f.kind, FormKind::Transfer) && i == 2) || f.kind == FormKind::Confirm {
+                mask(value)
+            } else {
+                value.clone()
+            };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("{label}："), Style::default().fg(MUT)),
+                Span::styled(
+                    shown,
+                    Style::default()
+                        .fg(if active { FG } else { MUT })
+                        .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+            ])),
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "_".repeat(inner.width as usize),
+                Style::default().fg(if active { ACCENT } else { BORDER }),
+            )])),
+            Rect {
+                x: inner.x,
+                y: y + 1,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
+    let err_y = inner.y + n * 2;
+    if let Some(e) = &f.error {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                format!("✗ {e}"),
+                Style::default().fg(ERR).add_modifier(Modifier::BOLD),
+            )])),
+            Rect {
+                x: inner.x,
+                y: err_y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
+    let ok_y = inner.y + inner.height.saturating_sub(2);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "[ 确定 ]",
+            Style::default().fg(OK).add_modifier(Modifier::BOLD),
+        )])),
+        Rect {
+            x: inner.x,
+            y: ok_y,
+            width: 10,
+            height: 1,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "[ 取消 ]",
+            Style::default().fg(MUT),
+        )])),
+        Rect {
+            x: inner.x + inner.width.saturating_sub(10),
+            y: ok_y,
+            width: 10,
+            height: 1,
+        },
+    );
 }
 
 // ---------------- 弹窗提醒 ----------------
@@ -325,15 +442,13 @@ fn draw_main(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(3), // 顶部状态栏
             Constraint::Min(0),    // 中部
-            Constraint::Length(3), // 输入栏
             Constraint::Length(1), // 帮助栏
         ])
         .split(area);
 
     draw_topbar(frame, app, rows[0]);
     draw_body(frame, app, rows[1]);
-    draw_input(frame, app, rows[2]);
-    draw_help(frame, app, rows[3]);
+    draw_help(frame, app, rows[2]);
 }
 
 fn draw_topbar(frame: &mut Frame, app: &App, area: Rect) {
@@ -374,7 +489,7 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_nav(frame: &mut Frame, app: &App, area: Rect) {
-    let items: Vec<ListItem> = View::ALL
+    let mut items: Vec<ListItem> = View::ALL
         .iter()
         .map(|v| {
             let selected = *v == app.view;
@@ -389,6 +504,11 @@ fn draw_nav(frame: &mut Frame, app: &App, area: Rect) {
             ]))
         })
         .collect();
+    // 退出项（鼠标点击）
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(" ", Style::default().fg(MUT)),
+        Span::styled("退出", Style::default().fg(ERR).add_modifier(Modifier::BOLD)),
+    ])));
     let mut list = List::new(items).block(
         Block::default()
             .borders(Borders::RIGHT)
@@ -407,26 +527,35 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
         .title(Span::styled(format!(" {} ", app.view.title()), Style::default().fg(ACCENT)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    // 鼠标操作按钮行（固定位置，点击触发：Sync/Submit/Send/Help/Quit）
-    let labels = [" [1]Sync ", " [2]Submit ", " [3]Send ", " [4]Help ", " [5]Quit "];
-    let btn_line: Vec<Span> = labels
-        .iter()
-        .map(|l| {
-            Span::styled(
-                l.to_string(),
-                Style::default().fg(MUT).add_modifier(Modifier::BOLD),
-            )
-        })
-        .collect();
-    frame.render_widget(
-        Paragraph::new(Line::from(btn_line)),
-        Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        },
-    );
+    // 中文子菜单操作按钮行（每按钮 12 列，与 app.view_actions 一致）
+    let actions: &[(&str, &str)] = match app.view {
+        View::Overview => &[("同步", "sync"), ("转账", "transfer"), ("刷新", "refresh")],
+        View::Accounts => {
+            &[("同步", "sync"), ("切换账户", "switch"), ("注册新账户", "register")]
+        }
+        View::Transactions => {
+            &[("转账", "transfer"), ("确认收款", "confirm"), ("提交待确认", "submit")]
+        }
+        View::Outbox => &[("全部提交", "submit"), ("刷新", "refresh")],
+        View::Settings => {
+            &[("中心地址", "setserver"), ("更改口令", "changepass"), ("返回登录", "relogin")]
+        }
+    };
+    for (i, (label, _id)) in actions.iter().enumerate() {
+        let x = inner.x + i as u16 * 12;
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                format!("[ {label} ]"),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )])),
+            Rect {
+                x,
+                y: inner.y,
+                width: 12,
+                height: 1,
+            },
+        );
+    }
     // 内容区下移一行给按钮行
     let content_area = Rect {
         x: inner.x,
@@ -601,43 +730,13 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, area);
 }
 
-fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
-    // 空闲时输入栏显示状态消息（命令反馈 / 同步结果）
-    if app.input_mode == InputMode::None {
-        let p = Paragraph::new(Line::from(vec![Span::styled(
-            app.status.clone(),
-            Style::default().fg(MUT),
-        )]));
-        frame.render_widget(p, Rect { x: area.x + 1, y: area.y, width: area.width.saturating_sub(2), height: 1 });
-        return;
-    }
-    let (prompt, hidden): (&str, bool) = match app.input_mode {
-        InputMode::Command => ("> ", false),
-        InputMode::Passphrase => ("口令> ", true),
-        InputMode::None => ("", false),
-    };
-    let mut text = String::from(prompt);
-    let shown = if hidden { mask(&app.input) } else { app.input.clone() };
-    text.push_str(&shown);
-    if app.input_mode != InputMode::None {
-        text.push('▌');
-    }
-    let style = if app.input_mode == InputMode::None {
-        Style::default().fg(MUT)
-    } else {
-        Style::default().fg(FG).add_modifier(Modifier::BOLD)
-    };
-    let p = Paragraph::new(text).style(style);
-    frame.render_widget(p, Rect { x: area.x + 1, y: area.y, width: area.width.saturating_sub(2), height: 1 });
-}
+// （1.3.0 起命令输入栏已移除，操作全部改为鼠标菜单 + 表单弹窗）
 
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
-    let msg = match app.input_mode {
-        InputMode::Command => "Enter 执行 · Esc 取消",
-        InputMode::Passphrase => "输入钱包口令签名 · Enter 确认 · Esc 取消",
-        InputMode::None => {
-            "↑↓ 切换 · 1-5 视图 · r 同步 · : 命令 · h 帮助 · q 退出"
-        }
+    let msg = if app.form.is_some() {
+        "表单输入：点击字段聚焦 · Enter 确定 · Esc 取消"
+    } else {
+        "鼠标操作：点击左侧菜单切换 · 点击上方按钮操作 · 文本输入在弹窗内用键盘 · q 退出"
     };
     let p = Paragraph::new(Line::from(vec![Span::styled(msg, Style::default().fg(MUT))]));
     frame.render_widget(p, Rect { x: area.x + 1, y: area.y, width: area.width.saturating_sub(2), height: 1 });

@@ -41,9 +41,9 @@ impl View {
     ];
     pub fn title(self) -> &'static str {
         match self {
-            View::Overview => "总览",
-            View::Transactions => "交易",
-            View::Accounts => "账户",
+            View::Overview => "首页",
+            View::Transactions => "交易记录",
+            View::Accounts => "我的账户",
             View::Outbox => "待提交",
             View::Settings => "设置",
         }
@@ -53,7 +53,8 @@ impl View {
     }
 }
 
-/// 输入模式（底部输入栏）。
+/// 输入模式（底部输入栏；1.3.0 起命令操作已弃用，保留兼容）。
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     None,
@@ -151,8 +152,12 @@ pub struct Popup {
 /// 鼠标点击命中目标。
 #[derive(Clone, Debug)]
 pub enum HitTarget {
-    Nav(usize),     // 左侧导航菜单第 i 项
-    Button(String), // 内容区操作按钮
+    Nav(usize),        // 左侧导航菜单第 i 项
+    Quit,              // 左侧菜单退出项
+    Button(String),    // 内容区操作按钮（action id）
+    FormField(usize),  // 表单字段
+    FormOk,            // 表单确定
+    FormCancel,        // 表单取消
 }
 
 /// 可点击区域（与 UI 渲染布局保持一致）。
@@ -165,13 +170,31 @@ pub struct HitArea {
     pub target: HitTarget,
 }
 
-/// 待提交的转账意图（口令输入完成后执行）。
+/// 表单类型（全鼠标菜单式操作，文本用键盘输入）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FormKind {
+    Transfer,  // 转账：接收方 / 金额 / 口令
+    Confirm,   // 确认收款：口令
+    SetServer, // 设置中心地址
+}
+
+/// 表单弹窗状态。
+pub struct Form {
+    pub kind: FormKind,
+    pub fields: Vec<String>,
+    pub focus: usize,
+    pub error: Option<String>,
+}
+
+/// 待提交的转账意图（口令输入完成后执行；1.3.0 起命令操作弃用，保留兼容）。
+#[allow(dead_code)]
 struct PendingSend {
     receiver: String,
     receiver_type: AccountType,
     amount: i64,
 }
 
+#[allow(dead_code)] // input_mode/input/pending_* 为旧命令栏遗留（1.3.0 起弃用，保留兼容）
 pub struct App {
     pub wallet: Wallet,
     pub mode: Mode,
@@ -194,9 +217,11 @@ pub struct App {
     pub login: Login,
     pub popup: Option<Popup>,
     pub hits: Vec<HitArea>,
+    pub form: Option<Form>,
     pub running: bool,
 }
 
+#[allow(dead_code)] // 旧命令栏方法（begin_send 等）1.3.0 起弃用，保留兼容
 impl App {
     pub fn new(wallet: Wallet) -> App {
         let initialized = wallet.info.initialized();
@@ -246,6 +271,7 @@ impl App {
             },
             popup: None,
             hits: Vec::new(),
+            form: None,
             running: true,
             wallet,
         }
@@ -264,31 +290,75 @@ impl App {
             height: size.height,
         };
         let body_y = area.y + 3; // 顶部状态栏高 3
-        // 左侧导航菜单（宽 14，5 个视图项）
-        for i in 0..View::ALL.len() {
+        // 左侧中文菜单（6 项：5 视图 + 退出）
+        for i in 0..6 {
             let y = body_y + i as u16;
             if y < area.y + area.height {
+                let target = if i == 5 { HitTarget::Quit } else { HitTarget::Nav(i) };
                 self.hits.push(HitArea {
                     x: area.x,
                     y,
                     w: 14,
                     h: 1,
-                    target: HitTarget::Nav(i),
+                    target,
                 });
             }
         }
-        // 内容区顶部操作按钮行（nav 宽 14 + 内容左边框 1）
+        // 内容区子菜单按钮行（nav 宽 14 + 内容左边框 1；每按钮 12 列）
         let content_x = area.x + 14 + 1;
         let btn_y = body_y + 1;
-        let btn_labels = ["Sync", "Submit", "Send", "Help", "Quit"];
-        for (i, b) in btn_labels.iter().enumerate() {
+        for (i, a) in self.view_actions().iter().enumerate() {
             self.hits.push(HitArea {
-                x: content_x + i as u16 * 8,
+                x: content_x + i as u16 * 12,
                 y: btn_y,
-                w: 8,
+                w: 12,
                 h: 1,
-                target: HitTarget::Button(b.to_string()),
+                target: HitTarget::Button(a.to_string()),
             });
+        }
+        // 表单弹窗字段与按钮
+        if let Some(f) = &self.form {
+            let w = area.width.min(60).saturating_sub(4).max(34);
+            let n = f.fields.len() as u16;
+            let h = n.saturating_add(6).min(area.height.saturating_sub(2).max(10));
+            let bx = area.x + area.width.saturating_sub(w) / 2;
+            let by = area.y + area.height.saturating_sub(h) / 2;
+            for i in 0..f.fields.len() {
+                let y = by + 2 + i as u16;
+                self.hits.push(HitArea {
+                    x: bx + 2,
+                    y,
+                    w: w.saturating_sub(4),
+                    h: 1,
+                    target: HitTarget::FormField(i),
+                });
+            }
+            let ok_y = by + h.saturating_sub(2);
+            self.hits.push(HitArea {
+                x: bx + 2,
+                y: ok_y,
+                w: 10,
+                h: 1,
+                target: HitTarget::FormOk,
+            });
+            self.hits.push(HitArea {
+                x: bx + w.saturating_sub(12),
+                y: ok_y,
+                w: 10,
+                h: 1,
+                target: HitTarget::FormCancel,
+            });
+        }
+    }
+
+    /// 当前视图的子菜单操作按钮（action id，与 ui.rs 渲染一致）。
+    fn view_actions(&self) -> Vec<&'static str> {
+        match self.view {
+            View::Overview => vec!["sync", "transfer", "refresh"],
+            View::Accounts => vec!["sync", "switch", "register"],
+            View::Transactions => vec!["transfer", "confirm", "submit"],
+            View::Outbox => vec!["submit", "refresh"],
+            View::Settings => vec!["setserver", "changepass", "relogin"],
         }
     }
 
@@ -299,24 +369,200 @@ impl App {
             self.popup = None;
             return;
         }
-        for hit in &self.hits {
-            if x >= hit.x && x < hit.x + hit.w && y >= hit.y && y < hit.y + hit.h {
-                match &hit.target {
-                    HitTarget::Nav(i) => {
-                        self.view = View::ALL[*i];
-                        self.refresh_view();
-                    }
-                    HitTarget::Button(b) => match b.as_str() {
-                        "Sync" => self.do_sync(),
-                        "Submit" => self.run_submit(),
-                        "Send" => self.begin_send_input(),
-                        "Help" => self.help_visible = !self.help_visible,
-                        "Quit" => self.quit(),
-                        _ => {}
-                    },
+        // 先找出命中的目标（克隆出来，避免借用冲突）
+        let hit_target: Option<HitTarget> = self
+            .hits
+            .iter()
+            .find(|hit| x >= hit.x && x < hit.x + hit.w && y >= hit.y && y < hit.y + hit.h)
+            .map(|hit| hit.target.clone());
+        // 表单打开：仅响应表单字段/按钮；点击表单外关闭
+        if self.form.is_some() {
+            match &hit_target {
+                Some(HitTarget::FormField(i)) => {
+                    let i = *i;
+                    self.form_set_focus(i);
                 }
-                return;
+                Some(HitTarget::FormOk) => self.form_submit(),
+                Some(HitTarget::FormCancel) => self.close_form(),
+                _ => self.close_form(),
             }
+            return;
+        }
+        match hit_target {
+            Some(HitTarget::Nav(i)) => {
+                self.view = View::ALL[i];
+                self.refresh_view();
+            }
+            Some(HitTarget::Quit) => self.quit(),
+            Some(HitTarget::Button(a)) => self.run_action(&a),
+            _ => {}
+        }
+    }
+
+    /// 执行内容区子菜单操作（全鼠标）。
+    fn run_action(&mut self, a: &str) {
+        match a {
+            "sync" => self.do_sync(),
+            "transfer" => self.open_form(FormKind::Transfer),
+            "confirm" => self.open_form(FormKind::Confirm),
+            "submit" => self.run_submit(),
+            "refresh" => self.refresh_view(),
+            "switch" | "relogin" => {
+                self.mode = Mode::Login;
+                self.login.password.clear();
+                self.login.busy = false;
+                self.login.error = None;
+            }
+            "register" => {
+                self.mode = Mode::Onboarding;
+                self.onboard.step = OnboardStep::Welcome;
+            }
+            "setserver" => self.open_form(FormKind::SetServer),
+            "changepass" => {
+                self.notify("更改口令", "口令在管理后台（9680）修改；客户端登录口令暂不支持在线修改")
+            }
+            _ => {}
+        }
+    }
+
+    /// 打开表单（全鼠标；文本用键盘输入）。
+    pub fn open_form(&mut self, kind: FormKind) {
+        let fields = match kind {
+            FormKind::Transfer => vec![String::new(), String::new(), String::new()],
+            FormKind::Confirm => vec![String::new()],
+            FormKind::SetServer => vec![self.wallet.info.server_url.clone()],
+        };
+        self.form = Some(Form {
+            kind,
+            fields,
+            focus: 0,
+            error: None,
+        });
+    }
+
+    pub fn form_set_focus(&mut self, i: usize) {
+        if let Some(f) = &mut self.form {
+            if i < f.fields.len() {
+                f.focus = i;
+            }
+        }
+    }
+
+    pub fn close_form(&mut self) {
+        self.form = None;
+    }
+
+    fn form_error(&mut self, focus: usize, msg: &str) {
+        if let Some(f) = &mut self.form {
+            f.focus = focus;
+            f.error = Some(msg.to_string());
+        }
+    }
+
+    /// 提交表单（转账 / 确认 / 设置中心地址）。
+    fn form_submit(&mut self) {
+        let (kind, fields) = match &self.form {
+            Some(f) => (f.kind, f.fields.clone()),
+            None => return,
+        };
+        match kind {
+            FormKind::Transfer => {
+                let (to, amt, pass) = (fields[0].clone(), fields[1].clone(), fields[2].clone());
+                let mut receiver = to.trim().to_string();
+                let mut rtype = AccountType::Individual;
+                if let Some(idx) = receiver.find('@') {
+                    let ty = receiver[idx + 1..].to_string();
+                    receiver = receiver[..idx].to_string();
+                    rtype = AccountType::from_str(&ty).unwrap_or(AccountType::Individual);
+                }
+                if receiver.is_empty() {
+                    return self.form_error(0, "请输入接收方 UID");
+                }
+                let amount: i64 = match amt.trim().parse() {
+                    Ok(v) if v > 0 => v,
+                    _ => return self.form_error(1, "金额须为大于 0 的数字"),
+                };
+                if pass.len() < 8 {
+                    return self.form_error(2, "口令至少 8 位");
+                }
+                match txn::build_and_sign_transfer(&self.wallet, &receiver, rtype, amount, &pass) {
+                    Ok((tx_id, tx_hash)) => {
+                        self.form = None;
+                        self.notify(
+                            "转账成功",
+                            &format!("已签名入待提交：{tx_id}\nhash {tx_hash:.12}…"),
+                        );
+                        self.load_outbox();
+                    }
+                    Err(e) => self.form_error(2, &e.to_string()),
+                }
+            }
+            FormKind::Confirm => {
+                let pass = fields[0].clone();
+                if pass.len() < 8 {
+                    return self.form_error(0, "口令至少 8 位");
+                }
+                // 取第一笔待确认交易
+                let tid = client_api::list_pending(&self.wallet)
+                    .ok()
+                    .and_then(|list| list.into_iter().next().map(|p| p.tx_id));
+                let tid = match tid {
+                    Some(t) => t,
+                    None => {
+                        self.form = None;
+                        self.notify("确认收款", "当前没有待确认交易");
+                        return;
+                    }
+                };
+                match client_api::confirm_tx(&self.wallet, &tid, &pass, None) {
+                    Ok(r) => {
+                        let st = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                        self.form = None;
+                        self.notify("确认结果", &format!("交易 {:.8}… 状态 → {st}", tid));
+                    }
+                    Err(e) => self.form_error(0, &e.to_string()),
+                }
+            }
+            FormKind::SetServer => {
+                let raw = fields[0].trim().to_string();
+                if raw.is_empty() {
+                    return self.form_error(0, "请输入中心地址");
+                }
+                let u = if raw.starts_with("http://") || raw.starts_with("https://") {
+                    raw
+                } else {
+                    format!("http://{raw}")
+                };
+                let _ = self.wallet.set_server_url(&u);
+                self.form = None;
+                self.notify("设置已保存", &format!("中心地址：{u}"));
+            }
+        }
+    }
+
+    /// 表单打开时键盘输入。
+    fn handle_form_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.form = None,
+            KeyCode::Tab => {
+                if let Some(f) = &mut self.form {
+                    f.focus = (f.focus + 1) % f.fields.len();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(f) = &mut self.form {
+                    f.fields[f.focus].pop();
+                    f.error = None;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(f) = &mut self.form {
+                    f.fields[f.focus].push(c);
+                    f.error = None;
+                }
+            }
+            KeyCode::Enter => self.form_submit(),
+            _ => {}
         }
     }
 
@@ -338,10 +584,9 @@ impl App {
         }
     }
 
-    /// 转账按钮：预填 send 命令，用户补全接收方与金额。
+    /// 转账按钮：打开转账表单。
     pub fn begin_send_input(&mut self) {
-        self.input = "send ".to_string();
-        self.input_mode = InputMode::Command;
+        self.open_form(FormKind::Transfer);
     }
 
     /// 弹窗式状态提醒（自动换行；Esc 关闭或 5 秒后消失）。
@@ -515,10 +760,14 @@ impl App {
             }
             return;
         }
-        match self.input_mode {
-            InputMode::None => self.main_nav(key),
-            InputMode::Command => self.handle_input(key, false),
-            InputMode::Passphrase => self.handle_input(key, true),
+        // 表单打开：键盘输入到表单
+        if self.form.is_some() {
+            self.handle_form_key(key);
+            return;
+        }
+        match key.code {
+            KeyCode::Char('q') => self.quit(),
+            _ => self.main_nav(key),
         }
     }
 
@@ -555,10 +804,6 @@ impl App {
             KeyCode::Char('r') | KeyCode::Char('R') => self.do_sync(),
             KeyCode::Char('h') | KeyCode::Char('H') => self.help_visible = !self.help_visible,
             KeyCode::Esc => self.help_visible = false,
-            KeyCode::Char(':') | KeyCode::Char('/') => {
-                self.input.clear();
-                self.input_mode = InputMode::Command;
-            }
             KeyCode::Enter => self.do_sync(),
             _ => {}
         }
@@ -1033,6 +1278,8 @@ impl App {
         self.refresh_view();
         self.status = format!("欢迎回来，{uid}");
         self.notify("登录成功", &format!("欢迎回来，{uid}"));
+        // 自动从中心拉取镜像清单与账户快照（免手动输入 apikey）
+        self.do_sync();
     }
 }
 
