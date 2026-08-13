@@ -113,7 +113,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const V = '1.3.0';
+const V = '2.0.0';
 let state = { logged_in:false };
 let view = 'home';
 let selectedUid = null;
@@ -158,32 +158,14 @@ function renderAuth(){
     $('auth-err').textContent = '';
     return;
   }
-  const logins = state.logins || [];
-  let html = '';
-  if(logins.length > 0){
-    html = '<div class="muted" style="margin-bottom:8px;">选择已有账户：</div>';
-    logins.forEach(a => {
-      const act = selectedUid === a.uid ? 'active' : '';
-      const tag = a.has_key ? '本地密钥' : '需联网取回';
-      html += `<div class="acc-item ${act}" data-uid="${esc(a.uid)}">
-        <div class="t">${esc(a.uid)} <span class="muted">[${esc(a.type)}]</span></div>
-        <div class="d">${tag} · 最近登录 ${fmtTs(a.last_login)}</div>
-      </div>`;
-    });
-    html += '<div class="muted" style="margin:12px 0 5px;">或登录其他设备注册的账户：</div>';
-  } else {
-    html = '<p class="muted" style="text-align:center;padding:2px 0 8px;">输入你的账户登录（可在其他电脑注册后在此登录，自动取回密钥）</p>';
-  }
-  html += '<label>账户 UID</label><input id="auth-uid" value="' + esc(selectedUid || '') + '" placeholder="如 Steve">';
-  html += '<label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">';
-  html += '<div class="btns">';
-  html += '<button class="btn" id="auth-login">登录</button>';
-  html += '<button class="btn ghost" id="auth-register">注册新账户</button>';
-  html += '</div>';
-  body.innerHTML = html;
-  body.querySelectorAll('.acc-item').forEach(el => {
-    el.onclick = () => { selectedUid = el.dataset.uid; renderAuth(); };
-  });
+  body.innerHTML = `
+    <p class="muted" style="text-align:center;padding:2px 0 10px;">输入账户 UID 登录（本机或中心已有账户均可）</p>
+    <label>账户 UID</label><input id="auth-uid" placeholder="如 Steve 或已认定国家/银行名称">
+    <label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">
+    <div class="btns">
+      <button class="btn" id="auth-login">登录</button>
+      <button class="btn ghost" id="auth-register">注册新账户</button>
+    </div>`;
   $('auth-login').onclick = async () => {
     const uid = ($('auth-uid').value || '').trim();
     const pass = $('auth-pass').value;
@@ -217,7 +199,7 @@ const MENU = [
 ];
 const ACTIONS = {
   home: [['sync','同步'],['transfer','转账'],['refresh','刷新']],
-  accounts: [['sync','同步'],['switch','切换账户'],['register','注册新账户']],
+  accounts: [['sync','同步'],['switch','切换账户'],['register','注册新账户'],['delete','注销账户']],
   txs: [['transfer','转账'],['confirm','确认收款'],['submit','提交待确认']],
   outbox: [['submit','全部提交'],['refresh','刷新']],
   settings: [['setserver','中心地址'],['logout','返回登录']]
@@ -289,8 +271,11 @@ function renderOutbox(){
 
 function renderSettings(){
   return `<div class="card"><h2>设置</h2>
-    <p class="muted">中心服务器：${esc(state.server_url || '未配置')}</p>
-    <p class="muted" style="margin-top:8px;">数据目录：${esc(state.server_url ? '~/.alpha_dir/acs-client' : '~/.alpha_dir/acs-client')}</p>
+    <table>
+      <tr><th>中心服务器</th><td>${esc(state.server_url || '未配置')}</td></tr>
+      <tr><th>数据目录</th><td>~/.alpha_dir/acs-client</td></tr>
+    </table>
+    <p class="muted" style="margin-top:12px;">本页包含：修改中心服务器地址、返回登录。<br>账户注销请前往「账户信息」页操作（危险操作）。</p>
   </div>`;
 }
 
@@ -302,13 +287,59 @@ async function runAction(act){
   else if(act==='refresh') await refresh();
   else if(act==='register') openModal('register', {});
   else if(act==='setserver') openModal('setserver', { url: state.server_url });
+  else if(act==='delete') openModal('close', {});
   else if(act==='switch' || act==='logout'){ await api('/api/logout', null, 'POST'); await refresh(); }
 }
 
 // ---------- 模态弹窗 ----------
+let memberLists = { countries: [], banks: [] };
+async function loadMembersCache(){
+  try { const r = await api('/api/members'); memberLists = { countries: r.countries || [], banks: r.banks || [] }; }
+  catch(e){ memberLists = { countries: [], banks: [] }; }
+}
+function regNameField(){
+  const t = $('r-type').value, wrap = $('r-name-wrap');
+  if(t === 'Country'){
+    const opts = memberLists.countries.map(c => `<option>${esc(c)}</option>`).join('');
+    wrap.innerHTML = `<label>国家名称（仅 AEU 已认定）</label><select id="r-uid">${opts || '<option value="">（暂无已认定国家）</option>'}</select>`;
+  } else if(t === 'Bank'){
+    const opts = memberLists.banks.map(c => `<option>${esc(c)}</option>`).join('');
+    wrap.innerHTML = `<label>银行名称（仅 AEU 已认定）</label><select id="r-uid">${opts || '<option value="">（暂无已认定银行）</option>'}</select>`;
+  } else {
+    wrap.innerHTML = `<label>UID（唯一识别符）</label><input id="r-uid" placeholder="如 Steve">`;
+  }
+}
+function renderRegisterModal(){
+  const body = $('modal-body'), err = $('modal-error');
+  body.innerHTML = `
+    <div class="field"><label>账户类型</label><select id="r-type" onchange="regNameField()">
+      <option value="Individual">个人账户</option>
+      <option value="Bank">银行账户</option>
+      <option value="Country">国家账户</option>
+    </select></div>
+    <div class="field" id="r-name-wrap"></div>
+    <div class="field"><label>邮箱</label><input id="r-email" placeholder="如 Steve@maxshin.top"></div>
+    <div class="field"><label>口令（≥8 位，用于签名与登录取回）</label><input id="r-pass" type="password"></div>`;
+  regNameField();
+  err.textContent = '';
+  $('modal-ok').onclick = async () => {
+    const uid = ($('r-uid').value || '').trim();
+    const r = await api('/api/register', { server_url:'', uid, type:$('r-type').value, email:$('r-email').value, password:$('r-pass').value });
+    if(r.ok){ closeModal(); toast(r.message); refresh(); } else err.textContent = r.message;
+  };
+  $('modal-cancel').onclick = closeModal;
+}
+
 function openModal(kind, data){
   const title = $('modal-title'), body = $('modal-body'), err = $('modal-error');
   err.textContent = '';
+  if(kind==='register'){
+    $('modal-title').textContent = '注册新账户';
+    body.innerHTML = '<p class="muted">正在加载已认定成员列表…</p>';
+    $('modal-wrap').classList.remove('hidden');
+    loadMembersCache().then(() => renderRegisterModal());
+    return;
+  }
   let html = '';
   if(kind==='transfer'){
     html = `<div class="field"><label>接收方 UID（可带 @类型）</label><input id="f-to" placeholder="如 Steve 或 AlphaEU@System"></div>
@@ -319,14 +350,12 @@ function openModal(kind, data){
       <p class="muted">将确认接收方收到的第一笔待确认交易。</p>`;
   } else if(kind==='setserver'){
     html = `<div class="field"><label>中心地址</label><input id="f-url" placeholder="https://acsystem.maxshin.top" value="${esc(data.url||'')}"></div>`;
-  } else if(kind==='register'){
-    html = `<div class="field"><label>中心服务器地址</label><input id="r-server" placeholder="https://acsystem.maxshin.top"></div>
-      <div class="field"><label>UID（唯一识别符）</label><input id="r-uid" placeholder="如 Steve"></div>
-      <div class="field"><label>账户类型</label><select id="r-type"><option value="Individual">个人账户</option><option value="Bank">银行账户</option><option value="Country">国家账户</option></select></div>
-      <div class="field"><label>邮箱</label><input id="r-email" placeholder="如 Steve@maxshin.top"></div>
-      <div class="field"><label>口令（≥8 位，用于签名与登录取回）</label><input id="r-pass" type="password"></div>`;
+  } else if(kind==='close'){
+    html = `<div class="field" style="color:#f85149;font-weight:bold;">⚠ 注销账户（不可撤销）</div>
+      <p class="muted" style="margin-bottom:12px;">注销后：中心账户状态改为「已注销」，账户信息与账本变为只读（保留供审计），<b>不可再登录</b>；本机记录与密钥将被删除。</p>
+      <div class="field"><label>输入钱包口令以确认注销</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
   }
-  $('modal-title').textContent = kind==='transfer'?'转账':(kind==='confirm'?'确认收款':(kind==='setserver'?'设置中心地址':'注册新账户'));
+  $('modal-title').textContent = kind==='transfer'?'转账':(kind==='confirm'?'确认收款':(kind==='setserver'?'设置中心地址':'注销账户'));
   body.innerHTML = html;
   $('modal-wrap').classList.remove('hidden');
   const ok = $('modal-ok'), cancel = $('modal-cancel');
@@ -340,8 +369,8 @@ function openModal(kind, data){
     } else if(kind==='setserver'){
       const r = await api('/api/set-server', { url:$('f-url').value });
       if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent = r.message;
-    } else if(kind==='register'){
-      const r = await api('/api/register', { server_url:$('r-server').value, uid:$('r-uid').value, type:$('r-type').value, email:$('r-email').value, password:$('r-pass').value });
+    } else if(kind==='close'){
+      const r = await api('/api/delete-account', { password:$('f-pass').value });
       if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent = r.message;
     }
   };

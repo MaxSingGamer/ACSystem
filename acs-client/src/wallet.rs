@@ -278,6 +278,17 @@ impl Wallet {
         Ok(())
     }
 
+    /// 注销账户：从本机删除该账户记录与密钥缓存（中心账户保留）。
+    pub fn delete_local_account(&mut self, uid: &str, atype: AccountType) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM local_accounts WHERE uid=?1 AND type=?2",
+            params![uid, atype.as_str()],
+        )?;
+        self.conn
+            .execute("DELETE FROM keys WHERE uid=?1", params![uid])?;
+        Ok(())
+    }
+
     /// 切换到指定账户（更新当前登录元信息；密钥已导入 gpg homedir，互不干扰）。
     pub fn switch_account(&mut self, uid: &str) -> Result<()> {
         let acc = self

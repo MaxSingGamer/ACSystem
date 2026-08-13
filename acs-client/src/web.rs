@@ -71,6 +71,8 @@ pub fn build(wallet: Wallet) -> (Router, SharedState) {
         .route("/api/confirm", post(confirm))
         .route("/api/submit", post(submit))
         .route("/api/set-server", post(set_server))
+        .route("/api/delete-account", post(delete_account))
+        .route("/api/members", get(members_ep))
         .route("/api/heartbeat", post(heartbeat))
         .route("/api/quit", post(quit))
         .with_state(state.clone());
@@ -223,11 +225,8 @@ fn login_account(w: &mut Wallet, uid: &str, pass: &str) -> anyhow::Result<String
         }
     }
     // 2) 无缓存或口令不符：向中心取回（服务端校验密码哈希）
-    let atype = w
-        .local_account(uid)
-        .map(|a| a.atype)
-        .unwrap_or(AccountType::Individual);
-    let r = client_api::fetch_key(w, uid, atype, pass)?;
+    let known_type = w.local_account(uid).map(|a| a.atype);
+    let r = client_api::fetch_key(w, uid, known_type, pass)?;
     let email = r.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let sek = r
         .get("encrypted_seckey")
@@ -237,6 +236,13 @@ fn login_account(w: &mut Wallet, uid: &str, pass: &str) -> anyhow::Result<String
     if sek.is_empty() {
         anyhow::bail!("中心未存有该账户加密私钥（该账户非本客户端注册）");
     }
+    // 中心返回的实际账户类型（未指定类型时中心自动匹配）
+    let atype = r
+        .get("type")
+        .and_then(|v| v.as_str())
+        .and_then(|s| AccountType::from_str(s))
+        .or(known_type)
+        .unwrap_or(AccountType::Individual);
     w.gpg.import_key(&sek).map_err(|e| anyhow::anyhow!("导入密钥失败：{e}"))?;
     w.save_local_account(uid, atype, &email, &sek)?;
     w.switch_account(uid)?;
@@ -394,6 +400,36 @@ async fn set_server(
     };
     w.set_server_url(&u).map_err(|e| err(&e.to_string()))?;
     Ok(ok(&format!("中心地址已保存：{u}")))
+}
+
+async fn members_ep(State(st): State<SharedState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut w = lock(&st);
+    ensure_server(&mut w);
+    match client_api::fetch_members(&w) {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(err(&e.to_string())),
+    }
+}
+
+async fn delete_account(
+    State(st): State<SharedState>,
+    Json(req): Json<PassReq>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut w = lock(&st);
+    let uid = w.info.uid.clone();
+    let atype = w.info.atype;
+    // 中心注销：状态改为 Deleted（账本只读保留，供审计；不可再登录）
+    match client_api::close_account(&w, &req.password) {
+        Ok(_) => {
+            let _ = w.delete_local_account(&uid, atype);
+            let _ = w.clear_current();
+            Ok(Json(json!({
+                "ok": true,
+                "message": format!("账户 {uid} 已注销：中心状态已改 Deleted（账本只读保留供审计），本机记录已删除"),
+            })))
+        }
+        Err(e) => Err(err(&e.to_string())),
+    }
 }
 
 async fn heartbeat(State(st): State<SharedState>) -> Json<Value> {

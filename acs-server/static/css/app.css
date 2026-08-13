@@ -48,6 +48,12 @@ header{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.85);backdro
 .panel>h2{font-size:17px;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--line)}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .row input,.row select{width:auto}
+/* 成员认定双列 */
+.mem-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.mem-col{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fbfbfd}
+.mem-col h3{font-size:14px;margin-bottom:12px}
+.mem-col .muted{font-weight:400}
+@media(max-width:760px){.mem-grid{grid-template-columns:1fr}}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th{color:var(--mut);font-weight:600;text-align:left;padding:10px;border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:10px;border-bottom:1px solid rgba(210,210,215,.5);vertical-align:top}

@@ -14,6 +14,7 @@ use acs_core::config::CoreConfig;
 use acs_core::db;
 use acs_core::gpg::GpgUtil;
 use acs_core::models::{Account, AccountStatus, AccountType};
+use axum::http::header;
 use axum::Router;
 
 use state::AppState;
@@ -52,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     // - 请求体大小限制 4MB（防超大 payload；pubkey/sig 均远小于此）
     // - 请求超时 30s（防慢速攻击）
     // - 隐藏 hyper 默认 Server 头
+    // - 安全响应头：防点击劫持 / MIME 嗅探 / 敏感信息泄露 / 页面缓存 / XSS
     let admin_app: Router = Router::new()
         .merge(web::routes())
         .merge(api::admin_routes())
@@ -63,6 +65,28 @@ async fn main() -> anyhow::Result<()> {
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::SERVER,
             axum::http::HeaderValue::from_static("ACS"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            axum::http::HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static(
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            ),
         ))
         .with_state(state.clone());
 
@@ -77,6 +101,14 @@ async fn main() -> anyhow::Result<()> {
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::SERVER,
             axum::http::HeaderValue::from_static("ACS"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("DENY"),
         ))
         .with_state(state);
 

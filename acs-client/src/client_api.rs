@@ -54,19 +54,67 @@ pub fn open_account(
 }
 
 /// 登录：向中心请求取回加密私钥（服务端校验密码哈希后返回），供本机导入或跨设备恢复。
+/// atype 为 None 时由中心按 UID 自动匹配账户类型。
 pub fn fetch_key(
     w: &Wallet,
     uid: &str,
-    atype: AccountType,
+    atype: Option<AccountType>,
     password: &str,
 ) -> Result<serde_json::Value> {
     let url = base(w)?;
     let body = json!({
         "uid": uid,
-        "type": atype.as_str(),
+        "type": atype.map(|t| t.as_str().to_string()).unwrap_or_default(),
         "password": password,
     });
     match shared_agent().post(&format!("{url}/api/client/fetch-key"))
+        .set("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send_json(body)
+    {
+        Ok(resp) => Ok(resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?),
+        Err(ureq::Error::Status(code, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+        }
+        Err(e) => Err(anyhow!("连接失败：{e}")),
+    }
+}
+
+/// 获取 AEU 已认定成员国家/银行（Active），供注册下拉选择。
+pub fn fetch_members(w: &Wallet) -> Result<serde_json::Value> {
+    let url = base(w)?;
+    match shared_agent()
+        .get(&format!("{url}/api/client/members"))
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+    {
+        Ok(resp) => Ok(resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?),
+        Err(ureq::Error::Status(code, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+        }
+        Err(e) => Err(anyhow!("连接失败：{e}")),
+    }
+}
+
+/// 注销账户：账户私钥签名后上传，中心将状态改为 Deleted（不可再登录，账本只读保留审计）。
+pub fn close_account(w: &Wallet, passphrase: &str) -> Result<serde_json::Value> {
+    let url = base(w)?;
+    let fp = w
+        .fingerprint(&w.info.uid)
+        .ok_or_else(|| anyhow!("未找到钱包密钥"))?;
+    let msg = format!("close:{}:{}", w.info.uid, w.info.atype.as_str());
+    let sig = w
+        .gpg
+        .sign_detached(&fp, passphrase, msg.as_bytes())
+        .map_err(|e| anyhow!("签名失败（口令可能不正确）：{e}"))?;
+    let body = json!({
+        "uid": w.info.uid,
+        "type": w.info.atype.as_str(),
+        "close_sig": sig,
+    });
+    match shared_agent().post(&format!("{url}/api/client/close"))
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(15))
         .send_json(body)

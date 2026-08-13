@@ -73,6 +73,30 @@
       <table><thead><tr><th>UID</th><th>角色</th><th>状态</th><th>操作</th></tr></thead>
       <tbody id="adminBody"></tbody></table>
     </div>
+    <div class="panel">
+      <h2>AEU 成员认定</h2>
+      <div class="muted" style="margin-bottom:14px">此处认定的成员国家 / 银行，客户端注册 Country / Bank 账户时只能从中选择。</div>
+      <div class="mem-grid">
+        <div class="mem-col">
+          <h3>成员国家 <span class="muted">（Country 账户可选）</span></h3>
+          <div class="row">
+            <input id="countryName" placeholder="国家名称（如 AlphaEU）">
+            <button class="btn-primary btn-sm" onclick="createMember('countries')">添加</button>
+          </div>
+          <table><thead><tr><th>ID</th><th>名称</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="countryBody"></tbody></table>
+        </div>
+        <div class="mem-col">
+          <h3>成员银行 <span class="muted">（Bank 账户可选）</span></h3>
+          <div class="row">
+            <input id="bankName" placeholder="银行名称（如 AEU 银行）">
+            <button class="btn-primary btn-sm" onclick="createMember('companies')">添加</button>
+          </div>
+          <table><thead><tr><th>ID</th><th>名称</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="bankBody"></tbody></table>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 安全 -->

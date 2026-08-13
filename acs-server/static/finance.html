@@ -57,12 +57,13 @@
 
   <div class="section" id="s-mem">
     <div class="panel">
-      <h2>成员企业注册表</h2>
+      <h2>成员企业认定（银行）</h2>
+      <div class="muted" style="margin-bottom:14px">此处认定的成员企业，客户端注册 Bank 账户时只能从中选择。</div>
       <div class="row">
-        <input id="mName" placeholder="企业名称" style="width:260px">
-        <button class="btn-primary btn-sm" onclick="addCompany()">注册</button>
+        <input id="mName" placeholder="企业 / 银行名称" style="width:260px">
+        <button class="btn-primary btn-sm" onclick="addCompany()">添加</button>
       </div>
-      <table><thead><tr><th>ID</th><th>名称</th><th>状态</th></tr></thead>
+      <table><thead><tr><th>ID</th><th>名称</th><th>状态</th><th>操作</th></tr></thead>
       <tbody id="memBody"></tbody></table>
     </div>
   </div>

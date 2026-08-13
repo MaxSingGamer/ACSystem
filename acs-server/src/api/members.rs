@@ -104,12 +104,20 @@ async fn update_member(
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("Active");
     let conn = st.db.lock().unwrap();
-    let n = conn
-        .execute(
+    // name 留空表示仅改状态（保留原名）
+    let n = if name.trim().is_empty() {
+        conn.execute(
+            &format!("UPDATE {table} SET status=?1 WHERE id=?2"),
+            params![status, id],
+        )
+        .map_err(ApiErr::from_err)?
+    } else {
+        conn.execute(
             &format!("UPDATE {table} SET name=?1, status=?2 WHERE id=?3"),
             params![name, status, id],
         )
-        .map_err(ApiErr::from_err)?;
+        .map_err(ApiErr::from_err)?
+    };
     if n == 0 {
         return Err(ApiErr::not_found("成员不存在"));
     }

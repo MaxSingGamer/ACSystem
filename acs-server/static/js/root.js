@@ -5,7 +5,7 @@ async function init() {
   const me = await api('/api/admin/me');
   if (me.role !== 'root') { location.href = '/finance'; return; }
   $('who').textContent = `${me.uid} · 根管理员`;
-  await Promise.all([loadOverview(), loadAccounts(), loadAdmins(), loadKeyStatus(), loadMirrors(), loadRegistry(), loadDaily(7)]);
+  await Promise.all([loadOverview(), loadAccounts(), loadAdmins(), loadMembers(), loadKeyStatus(), loadMirrors(), loadRegistry(), loadDaily(7)]);
 }
 init().catch(e => { if (!TOKEN) location.href = '/login'; else alert(e.message); });
 
@@ -85,6 +85,47 @@ async function createAdmin() {
 
 async function adminToggle(id, act) { await api(`/api/admins/${id}/${act}`, { method: 'POST' }); loadAdmins(); }
 async function adminDel(id) { if (!confirm(`确定删除该管理员？`)) return; await api(`/api/admins/${id}`, { method: 'DELETE' }); loadAdmins(); }
+
+/* ---------- 成员国家 / 银行认定 ---------- */
+async function loadMembers() {
+  await loadMemberList('countries', 'countryBody');
+  await loadMemberList('companies', 'bankBody');
+}
+
+async function loadMemberList(kind, tbody) {
+  if (!$(tbody)) return;
+  const d = await api(`/api/members/${kind}`);
+  const rows = d.items || [];
+  $(tbody).innerHTML = rows.map(m => `
+    <tr>
+      <td class="mono">${m.id}</td>
+      <td>${esc(m.name)}</td>
+      <td><span class="tag ${m.status.toLowerCase()}">${esc(m.status)}</span></td>
+      <td class="ops">
+        ${m.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="memToggle('${kind}',${m.id},'Inactive')">撤销认定</button>` : `<button class="btn-sm btn-secondary" onclick="memToggle('${kind}',${m.id},'Active')">重新认定</button>`}
+        <button class="btn-sm btn-danger" onclick="memDel('${kind}',${m.id})">删除</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="4" class="muted">无记录</td></tr>';
+}
+
+async function createMember(kind) {
+  const nameEl = kind === 'countries' ? $('countryName') : $('bankName');
+  const name = nameEl.value.trim();
+  if (!name) { alert('请输入名称'); return; }
+  await api(`/api/members/${kind}`, { method: 'POST', body: JSON.stringify({ name, status: 'Active' }) });
+  nameEl.value = '';
+  loadMemberList(kind, kind === 'countries' ? 'countryBody' : 'bankBody');
+}
+
+async function memToggle(kind, id, status) {
+  await api(`/api/members/${kind}/${id}`, { method: 'PUT', body: JSON.stringify({ status }) });
+  loadMemberList(kind, kind === 'countries' ? 'countryBody' : 'bankBody');
+}
+async function memDel(kind, id) {
+  if (!confirm('确定删除该成员记录？')) return;
+  await api(`/api/members/${kind}/${id}`, { method: 'DELETE' });
+  loadMemberList(kind, kind === 'countries' ? 'countryBody' : 'bankBody');
+}
 
 /* ---------- 安全：铸造 + 密钥 ---------- */
 async function loadKeyStatus() {

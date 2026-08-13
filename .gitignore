@@ -7,6 +7,9 @@ dist/
 build-packages.ps1
 packaging/
 
+# Gpg4win 安装器（随安装包嵌入，本地保留不上传）
+gpg4win-*.exe
+
 # ============================================================
 #  敏感数据：绝不上传
 #  - TLS 私钥（证书 cert.pem 可公开，私钥 key.pem 绝不公开）

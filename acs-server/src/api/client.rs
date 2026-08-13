@@ -27,6 +27,72 @@ pub fn routes() -> Router<AppState> {
         .route("/api/client/reject", post(confirm))
         .route("/api/client/pending", get(pending))
         .route("/api/client/fetch-key", post(fetch_key))
+        .route("/api/client/members", get(list_public_members))
+        .route("/api/client/close", post(close_account))
+}
+
+/// 公开：返回 AEU 已认定的成员国家与银行（Active），供 client 注册下拉选择。
+async fn list_public_members(State(st): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let conn = st.db.lock().unwrap();
+    let mut countries = Vec::new();
+    let mut banks = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT name FROM member_countries WHERE status='Active' ORDER BY name")
+            .map_err(ApiErr::from_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(ApiErr::from_err)?;
+        for r in rows {
+            countries.push(r.map_err(ApiErr::from_err)?);
+        }
+    }
+    {
+        let mut stmt = conn
+            .prepare("SELECT name FROM member_companies WHERE status='Active' ORDER BY name")
+            .map_err(ApiErr::from_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(ApiErr::from_err)?;
+        for r in rows {
+            banks.push(r.map_err(ApiErr::from_err)?);
+        }
+    }
+    Ok(Json(json!({ "countries": countries, "banks": banks })))
+}
+
+// ---------- 注销账户（中心侧：状态改 Deleted，账本只读保留） ----------
+
+#[derive(Deserialize)]
+pub struct CloseReq {
+    pub uid: String,
+    #[serde(rename = "type")]
+    pub atype: String,
+    pub close_sig: String, // 账户私钥对 "close:{uid}:{type}" 的 detached 签名
+}
+
+/// 注销：校验账户本人签名后，将状态改为 Deleted（账本与账户信息只读保留，供审计；不可再登录）。
+async fn close_account(
+    State(st): State<AppState>,
+    Json(req): Json<CloseReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let atype = AccountType::from_str(&req.atype)
+        .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+    let msg = format!("close:{}:{}", req.uid, atype.as_str());
+    let pubk = {
+        let conn = st.db.lock().unwrap();
+        account_pubkey(&conn, &req.uid, atype).ok_or_else(|| ApiErr::not_found("账户不存在"))?
+    };
+    if !st
+        .gpg
+        .verify_detached(&pubk, msg.as_bytes(), &req.close_sig)
+        .map_err(ApiErr::from)?
+    {
+        return Err(ApiErr::forbidden("注销签名校验失败"));
+    }
+    let conn = st.db.lock().unwrap();
+    account::set_status(&conn, &req.uid, atype, AccountStatus::Deleted).map_err(ApiErr::from)?;
+    Ok(Json(json!({ "ok": true, "uid": req.uid, "type": atype.as_str(), "status": "Deleted" })))
 }
 
 /// 读取账户公钥（用于验签）。
@@ -70,6 +136,36 @@ async fn open_account(
     if account::account_exists(&conn, &req.uid, atype)? {
         return Err(ApiErr::bad_request("账户已存在"));
     }
+    // Country/Bank 账户必须为 AEU 已认定成员（Active），否则拒绝开立
+    match atype {
+        AccountType::Country => {
+            let ok = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM member_countries WHERE name=?1 AND status='Active'",
+                    params![req.uid.trim()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
+            if !ok {
+                return Err(ApiErr::bad_request("该国家未经 AEU 理事会认定，无法开立国家账户"));
+            }
+        }
+        AccountType::Bank => {
+            let ok = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM member_companies WHERE name=?1 AND status='Active'",
+                    params![req.uid.trim()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
+            if !ok {
+                return Err(ApiErr::bad_request("该银行未经 AEU 理事会认定，无法开立银行账户"));
+            }
+        }
+        _ => {}
+    }
     let now = Utc::now();
     let acc = Account {
         uid: req.uid.trim().to_string(),
@@ -101,8 +197,8 @@ async fn open_account(
 #[derive(Deserialize)]
 pub struct FetchKeyReq {
     pub uid: String,
-    #[serde(rename = "type", default = "default_type")]
-    pub atype: String,
+    #[serde(rename = "type", default)]
+    pub atype: String, // 可空：空则按 UID 在所有账户类型中自动匹配
     pub password: String,
 }
 
@@ -111,31 +207,50 @@ async fn fetch_key(
     State(st): State<AppState>,
     Json(req): Json<FetchKeyReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let atype = AccountType::from_str(&req.atype)
-        .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+    // 类型：指定则单类型；否则按 UID 在全部账户类型中自动匹配
+    let atypes: Vec<AccountType> = if req.atype.trim().is_empty() {
+        vec![
+            AccountType::Individual,
+            AccountType::Country,
+            AccountType::Bank,
+            AccountType::System,
+        ]
+    } else {
+        let t = AccountType::from_str(&req.atype)
+            .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+        vec![t]
+    };
     let conn = st.db.lock().unwrap();
-    let stored: Option<String> = conn
-        .query_row(
-            "SELECT password_hash FROM account_credentials WHERE uid=?1 AND type=?2",
-            params![req.uid, atype.as_str()],
-            |r| r.get(0),
-        )
-        .ok();
-    let stored = stored.ok_or_else(|| ApiErr::not_found("该账户未设置登录凭证（需客户端注册时开启）"))?;
-    let (salt, hash) = stored.split_once('$').unwrap_or(("", &stored));
-    if crate::auth::hash_password(&req.password, salt) != hash {
-        return Err(ApiErr::forbidden("密码错误"));
+    let mut last_err: Option<ApiErr> = None;
+    for atype in atypes {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT password_hash FROM account_credentials WHERE uid=?1 AND type=?2",
+                params![req.uid, atype.as_str()],
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(stored) = stored else { continue };
+        let (salt, hash) = stored.split_once('$').unwrap_or(("", &stored));
+        if crate::auth::hash_password(&req.password, salt) != hash {
+            last_err = Some(ApiErr::forbidden("密码错误"));
+            continue;
+        }
+        let acc = account::get_account(&conn, &req.uid, atype)?
+            .ok_or_else(|| ApiErr::not_found("账户不存在"))?;
+        if acc.status != AccountStatus::Active {
+            return Err(ApiErr::forbidden("该账户已注销/冻结，无法登录"));
+        }
+        return Ok(Json(json!({
+            "ok": true,
+            "uid": acc.uid,
+            "type": atype.as_str(),
+            "email": acc.email,
+            "pubkey": acc.pubkey,
+            "encrypted_seckey": acc.encrypted_seckey,
+        })));
     }
-    let acc = account::get_account(&conn, &req.uid, atype)?
-        .ok_or_else(|| ApiErr::not_found("账户不存在"))?;
-    Ok(Json(json!({
-        "ok": true,
-        "uid": acc.uid,
-        "type": atype.as_str(),
-        "email": acc.email,
-        "pubkey": acc.pubkey,
-        "encrypted_seckey": acc.encrypted_seckey,
-    })))
+    Err(last_err.unwrap_or_else(|| ApiErr::not_found("该账户未设置登录凭证（需客户端注册时开启）")))
 }
 
 // ---------- 提交交易 ----------

@@ -95,6 +95,7 @@ pub enum AccountStatus {
     Active,
     Frozen,
     Closed,
+    Deleted, // 已注销：账户与账本只读，不可再登录（保留审计）
 }
 
 impl AccountStatus {
@@ -103,6 +104,7 @@ impl AccountStatus {
             AccountStatus::Active => "Active",
             AccountStatus::Frozen => "Frozen",
             AccountStatus::Closed => "Closed",
+            AccountStatus::Deleted => "Deleted",
         }
     }
 
@@ -111,6 +113,7 @@ impl AccountStatus {
             "Active" => Some(AccountStatus::Active),
             "Frozen" => Some(AccountStatus::Frozen),
             "Closed" => Some(AccountStatus::Closed),
+            "Deleted" => Some(AccountStatus::Deleted),
             _ => None,
         }
     }

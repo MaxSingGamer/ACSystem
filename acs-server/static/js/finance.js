@@ -56,14 +56,30 @@ async function loadCompanies() {
   const d = await api('/api/members/companies');
   const rows = d.items || [];
   $('memBody').innerHTML = rows.map(c => `
-    <tr><td>${c.id}</td><td>${esc(c.name)}</td>
-      <td><span class="tag ${c.status.toLowerCase()}">${esc(c.status)}</span></td></tr>`).join('') || '<tr><td colspan="3" class="muted">无记录</td></tr>';
+    <tr>
+      <td class="mono">${c.id}</td>
+      <td>${esc(c.name)}</td>
+      <td><span class="tag ${c.status.toLowerCase()}">${esc(c.status)}</span></td>
+      <td class="ops">
+        ${c.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="memToggle(${c.id},'Inactive')">撤销认定</button>` : `<button class="btn-sm btn-secondary" onclick="memToggle(${c.id},'Active')">重新认定</button>`}
+        <button class="btn-sm btn-danger" onclick="memDel(${c.id})">删除</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="4" class="muted">无记录</td></tr>';
 }
 async function addCompany() {
   const name = $('mName').value.trim();
   if (!name) { alert('请填写企业名称'); return; }
   await api('/api/members/companies', { method: 'POST', body: JSON.stringify({ name }) });
   $('mName').value = '';
+  loadCompanies();
+}
+async function memToggle(id, status) {
+  await api(`/api/members/companies/${id}`, { method: 'PUT', body: JSON.stringify({ status }) });
+  loadCompanies();
+}
+async function memDel(id) {
+  if (!confirm('确定删除该成员记录？')) return;
+  await api(`/api/members/companies/${id}`, { method: 'DELETE' });
   loadCompanies();
 }
 
