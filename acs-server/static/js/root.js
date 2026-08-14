@@ -102,7 +102,7 @@ async function loadMemberList(kind, tbody) {
       <td>${esc(m.name)}</td>
       <td><span class="tag ${m.status.toLowerCase()}">${esc(m.status)}</span></td>
       <td class="ops">
-        ${m.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="memToggle('${kind}',${m.id},'Inactive')">撤销认定</button>` : `<button class="btn-sm btn-secondary" onclick="memToggle('${kind}',${m.id},'Active')">重新认定</button>`}
+        ${m.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="memToggle('${kind}',${m.id},'Deleted')">取消登记</button>` : `<button class="btn-sm btn-secondary" onclick="memToggle('${kind}',${m.id},'Active')">重新登记</button>`}
         <button class="btn-sm btn-danger" onclick="memDel('${kind}',${m.id})">删除</button>
       </td>
     </tr>`).join('') || '<tr><td colspan="4" class="muted">无记录</td></tr>';

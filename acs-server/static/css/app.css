@@ -63,6 +63,7 @@ tr:hover td{background:#fafafa}
 .tag.Frozen{background:#fdf3e3;color:#9a5b00}
 .tag.Closed{background:#fbe9e9;color:var(--red)}
 .tag.Disabled{background:#f1f1f4;color:var(--mut)}
+.tag.Deleted{background:#fbe9e9;color:var(--red)}
 .tag.root{background:#e8f0fe;color:#1a56a0}
 .tag.finance{background:#e6f4f2;color:#0f766e}
 .msg{color:var(--red);font-size:13px;min-height:16px;margin-top:8px}

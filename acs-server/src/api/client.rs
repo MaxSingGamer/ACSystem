@@ -58,7 +58,7 @@ async fn list_public_members(State(st): State<AppState>) -> ApiResult<Json<serde
             banks.push(r.map_err(ApiErr::from_err)?);
         }
     }
-    Ok(Json(json!({ "countries": countries, "banks": banks })))
+    Ok(Json(json!({ "countries": countries, "banks": banks, "systems": ["PreIssuedAccount", "AESystem", "AlphaEU"] })))
 }
 
 // ---------- 注销账户（中心侧：状态改 Deleted，账本只读保留） ----------

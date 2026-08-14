@@ -64,7 +64,8 @@
   #auth .acc-item .t{font-weight:bold;}
   #auth .acc-item .d{color:var(--mut); font-size:12px; margin-top:3px;}
   #auth label{display:block; color:var(--mut); margin:12px 0 5px;}
-  #auth input{width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:9px 11px;}
+  #auth input,#auth select{width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:9px 11px;}
+  #auth input:focus,#auth select:focus{outline:none; border-color:var(--acc);}
   #auth .err{color:var(--err); margin-top:8px; min-height:18px;}
   #auth .btns{display:flex; gap:8px; margin-top:14px;}
   #auth .btns .btn{flex:1;}
@@ -141,6 +142,8 @@ function toast(msg, isErr){
 function renderAuth(){
   const body = $('auth-body');
   if(state.logged_in){ $('auth').classList.add('hidden'); $('layout').classList.remove('hidden'); render(); return; }
+  // 修复：未登录时也刷新顶部栏（隐藏用户信息/同步/退出按钮）
+  renderTop();
   $('auth').classList.remove('hidden'); $('layout').classList.add('hidden');
   // 第一步：未配置中心服务器 → 先配置（留空默认 acsystem.maxshin.top）
   if(!state.server_url){
@@ -159,23 +162,51 @@ function renderAuth(){
     return;
   }
   body.innerHTML = `
-    <p class="muted" style="text-align:center;padding:2px 0 10px;">输入账户 UID 登录（本机或中心已有账户均可）</p>
-    <label>账户 UID</label><input id="auth-uid" placeholder="如 Steve 或已认定国家/银行名称">
+    <label>账户类型</label>
+    <select id="auth-type" onchange="authTypeChange()">
+      <option value="Individual">个人账户</option>
+      <option value="Bank">银行账户</option>
+      <option value="Country">国家账户</option>
+      <option value="System">系统账户</option>
+    </select>
+    <div id="auth-uid-wrap"></div>
     <label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">
     <div class="btns">
       <button class="btn" id="auth-login">登录</button>
       <button class="btn ghost" id="auth-register">注册新账户</button>
     </div>`;
+  authTypeChange();
   $('auth-login').onclick = async () => {
     const uid = ($('auth-uid').value || '').trim();
     const pass = $('auth-pass').value;
-    if(!uid){ $('auth-err').textContent = '请输入账户 UID'; return; }
+    if(!uid){ $('auth-err').textContent = '请输入或选择账户 UID'; return; }
     if(pass.length < 8){ $('auth-err').textContent = '密码至少 8 位'; return; }
     const r = await api('/api/login', { uid, password: pass });
     if(r.ok){ await refresh(); toast(r.message); } else { $('auth-err').textContent = r.message; }
   };
   $('auth-register').onclick = () => openModal('register', {});
   $('auth-err').textContent = '';
+  // 成员列表就绪后刷新下拉选项
+  loadMembersCache().then(authTypeChange);
+}
+
+function authTypeChange(){
+  const sel = $('auth-type');
+  const wrap = $('auth-uid-wrap');
+  if(!sel || !wrap) return;
+  const t = sel.value;
+  if(t === 'Individual'){
+    wrap.innerHTML = `<label>账户 UID</label><input id="auth-uid" placeholder="如 Steve">`;
+  } else if(t === 'Bank'){
+    const opts = (memberLists.banks || []).map(c => `<option>${esc(c)}</option>`).join('');
+    wrap.innerHTML = `<label>银行名称（仅 AEU 已认定）</label><select id="auth-uid">${opts || '<option value="">（暂无已认定银行）</option>'}</select>`;
+  } else if(t === 'Country'){
+    const opts = (memberLists.countries || []).map(c => `<option>${esc(c)}</option>`).join('');
+    wrap.innerHTML = `<label>国家名称（仅 AEU 已认定）</label><select id="auth-uid">${opts || '<option value="">（暂无已认定国家）</option>'}</select>`;
+  } else if(t === 'System'){
+    const opts = (memberLists.systems || []).map(c => `<option>${esc(c)}</option>`).join('');
+    wrap.innerHTML = `<label>系统账户</label><select id="auth-uid">${opts || '<option value="">（暂无）</option>'}</select>`;
+  }
 }
 
 function render(){
@@ -292,10 +323,10 @@ async function runAction(act){
 }
 
 // ---------- 模态弹窗 ----------
-let memberLists = { countries: [], banks: [] };
+let memberLists = { countries: [], banks: [], systems: [] };
 async function loadMembersCache(){
-  try { const r = await api('/api/members'); memberLists = { countries: r.countries || [], banks: r.banks || [] }; }
-  catch(e){ memberLists = { countries: [], banks: [] }; }
+  try { const r = await api('/api/members'); memberLists = { countries: r.countries || [], banks: r.banks || [], systems: r.systems || [] }; }
+  catch(e){ memberLists = { countries: [], banks: [], systems: [] }; }
 }
 function regNameField(){
   const t = $('r-type').value, wrap = $('r-name-wrap');

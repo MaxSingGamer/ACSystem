@@ -61,7 +61,7 @@ async function loadCompanies() {
       <td>${esc(c.name)}</td>
       <td><span class="tag ${c.status.toLowerCase()}">${esc(c.status)}</span></td>
       <td class="ops">
-        ${c.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="memToggle(${c.id},'Inactive')">撤销认定</button>` : `<button class="btn-sm btn-secondary" onclick="memToggle(${c.id},'Active')">重新认定</button>`}
+        ${c.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="memToggle(${c.id},'Deleted')">取消登记</button>` : `<button class="btn-sm btn-secondary" onclick="memToggle(${c.id},'Active')">重新登记</button>`}
         <button class="btn-sm btn-danger" onclick="memDel(${c.id})">删除</button>
       </td>
     </tr>`).join('') || '<tr><td colspan="4" class="muted">无记录</td></tr>';

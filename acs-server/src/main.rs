@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
     db::migrate_center(&conn)?;
     seed_default_admins(&conn, &gpg)?;
     seed_system_accounts(&conn, &gpg, &cfg)?;
+    init_system_credentials(&conn, &cfg)?;
 
     let state = AppState::new(conn, gpg);
     // 网络安全加固（两服务共用）：
@@ -226,4 +227,46 @@ fn ensure_master_key(cfg: &CoreConfig) -> anyhow::Result<String> {
     let key = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string();
     std::fs::write(&path, &key)?;
     Ok(key)
+}
+
+/// 初始化系统账户登录凭证：用现有私钥 passphrase 作为登录密码（密码=私钥口令，
+/// 与一般账户一致，登录后可直接签名），写入 account_credentials；密码输出到
+/// 数据目录 SYSTEM_LOGIN_PASSWORDS.txt（仅首次初始化时写一次）。
+fn init_system_credentials(
+    conn: &rusqlite::Connection,
+    cfg: &CoreConfig,
+) -> anyhow::Result<()> {
+    let master_key = ensure_master_key(cfg)?;
+    let mut pw_lines = String::new();
+    for uid in ["PreIssuedAccount", "AESystem", "AlphaEU"] {
+        // 已有登录凭证则跳过
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM account_credentials WHERE uid=?1 AND type='System'",
+            rusqlite::params![uid],
+            |r| r.get(0),
+        )?;
+        if exists > 0 {
+            continue;
+        }
+        // 用现有私钥 passphrase 作为登录密码（读 .key 用主密钥解密）
+        let key_enc = std::fs::read_to_string(cfg.data_dir.join(format!("{uid}.key")))?;
+        let pwd = crypto::decrypt_secret(&key_enc, &master_key)
+            .map_err(|e| anyhow::anyhow!("解密系统账户 {uid} passphrase 失败: {e}"))?;
+        // 存登录凭证（$salt$sha256）
+        let salt = uuid::Uuid::new_v4().to_string();
+        let ph = format!("{salt}${}", auth::hash_password(&pwd, &salt));
+        conn.execute(
+            "INSERT INTO account_credentials(uid, type, password_hash) VALUES (?1,'System',?2) \
+             ON CONFLICT(uid,type) DO UPDATE SET password_hash=excluded.password_hash",
+            rusqlite::params![uid, ph],
+        )?;
+        pw_lines.push_str(&format!("{uid}={pwd}\n"));
+        println!("[acs-server] 系统账户登录凭证已初始化: {uid}");
+    }
+    if !pw_lines.is_empty() {
+        let path = cfg.data_dir.join("SYSTEM_LOGIN_PASSWORDS.txt");
+        std::fs::write(&path, pw_lines)?;
+        println!("[acs-server] 系统账户登录密码已写入: {}", path.display());
+    }
+    Ok(())
 }
