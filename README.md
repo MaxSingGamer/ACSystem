@@ -2,7 +2,7 @@
 
 > **ACSystem**：为 Minecraft 服务器组织 **AEU（Alpha Economy Union）** 提供可审计、可签名的 A€ 结算基础设施。
 > Rust workspace，四个 crate：核心库 / 中心服务器 / 钱包客户端 / 只读镜像。
-> 当前版本 **v1.3.0**。
+> 当前版本 **v2.0.0**。
 
 ---
 
@@ -11,23 +11,25 @@
 - **中心化结算**：发行权收归理事会，中心密钥由理事长口令 AES-GCM 加密保管。
 - **防双花**：SQLite（WAL）+ `BEGIN IMMEDIATE` 事务，每账户哈希链（`last_tx_hash`）环环相扣。
 - **防假币**：每笔交易由发送方 **ed25519 签名** + 中心签名，双方确认（`tx_confirmations`）后才入账。
-- **多账户登录**：一个钱包可登录多个账户互不干扰；启动时从本地账户清单选择并输入密码，本地有加密私钥缓存直接解锁，否则自动向中心取回（跨设备恢复）。
+- **多账户登录**：一个钱包可登录多个账户互不干扰；登录界面直接输入 UID+密码（本地记录不在界面展示），本地有加密私钥缓存直接解锁，否则自动向中心取回（跨设备恢复）。
 - **密钥体系**：GnuPG（`gpg.exe`，ed25519）签发身份；账户公钥上链，私钥始终由你的口令加密——加密副本存中心可跨设备恢复，口令不落盘、不传明文。
-- **全鼠标菜单操作**：TUI 采用分级中文菜单，点击左侧菜单切换视图、点击内容区按钮完成同步/转账/确认/提交/设置；转账与设置通过弹窗表单输入，除文本输入外全程鼠标完成。
-- **弹窗式状态提醒**：同步/转账/提交等结果以居中弹窗展示，自动换行，Esc/Enter 关闭。
+- **Web GUI 客户端**：启动本地 Web 服务并自动打开浏览器，全中文鼠标操作（登录/注册/菜单/表单）；关闭网页自动退出进程。
+- **弹窗式状态提醒**：同步/转账/提交等结果以居中弹窗展示，自动换行。
+- **成员国家/银行认定**：管理员在后台认定 AEU 成员国家/银行，客户端注册 Country/Bank 账户只能从下拉列表选择已认定成员（服务端二次校验）。
+- **注销账户（双重）**：中心将账户状态改为 `Deleted`（账户与账本只读保留供审计，不可再登录）+ 本地删除记录与密钥；危险操作有明确提示。
 - **双端口隔离**：公开 API（client/mirror）与管理后台（网页 + 管理 API）分开监听，后台默认仅本机可达。
 - **社区化同步**：client/mirror 免 apikey，自动测速选择最快镜像源。
-- **一键安装**：client / server 安装包自动检测并下载安装 GnuPG（Gpg4win），无需手动装依赖。
+- **一键安装**：client / server 安装包内嵌 `gpg4win-5.1.0.exe`，装完自动启动安装向导由用户手动安装（默认路径 Program Files\GnuPG），无需联网下载。
 - **只读镜像**：`acs-mirror` 增量同步中心账本，提供只读 HTTP 查询，不承载任何写操作。
 - **HTTPS 就绪**：经内网穿透（如 frp）暴露公网，由穿透服务商提供 AutoTLS 证书；也可 TCP 透传 + 本地证书实现端到端加密，客户端使用系统信任链校验（不跳过）。
-- **安全加固**：请求体限 4MB、超时 30s、隐藏 Server 头、管理操作审计留痕、源码无硬编码密钥。
+- **安全加固**：请求体限 4MB、超时 30s、隐藏 Server 头、安全响应头（CSP/X-Frame-Options/nosniff/no-store）、管理操作审计留痕、源码无硬编码密钥。
 
 ---
 
 ## 二、架构
 
 ```
-公网客户端 (TUI 钱包 / 镜像) ──https──► 穿透服务商边缘 :443 (AutoTLS 终止)
+公网客户端 (Web 钱包 / 镜像) ──https──► 穿透服务商边缘 :443 (AutoTLS 终止)
                                               │ 内网穿透隧道（frp 等，自行部署）
                                               ▼
                                       acs-server 公开 API  :9600 (0.0.0.0)
@@ -53,7 +55,7 @@
 |---|---|---|
 | **acs-core** | 核心库 | 数据模型 / SQLite / 账户 / 交易 / GnuPG / 配置 / 错误；产出 `rlib` + `cdylib`(dll) |
 | **acs-server** | 中心服务器 | axum 0.8，双端口：公开 API + 网页管理后台 |
-| **acs-client** | 钱包客户端 | ratatui TUI（全鼠标分级中文菜单）+ CLI 子命令；多账户与私钥于 `~/.alpha_dir` |
+| **acs-client** | 钱包客户端 | 本地 Web GUI（自动开浏览器 + 全中文鼠标操作）+ CLI 子命令；多账户与私钥于 `~/.alpha_dir/acs-client` |
 | **acs-mirror** | 只读镜像 | 增量同步 + 只读 HTTP 查询（默认 9090） |
 
 ### 信任模型
@@ -96,32 +98,33 @@ cargo run -p acs-server
 
 > 管理后台默认密码从环境变量 `ACS_ADMIN_PASSWORD` 读取；**未设置则随机生成 16 位强密码**并打印到日志。
 
-### 3. 客户端（Alpha Wallet）
+### 3. 客户端（Alpha Wallet · Web GUI）
 
 ```powershell
-# 创建钱包（首次使用，交互或全参数）
-acs-client new --uid Steve --email Steve@aeu.org --pass 'xxx' --server http://127.0.0.1:9600
-
-# 常用子命令
-acs-client status                          # 钱包状态
-acs-client sync                            # 从中心拉取一次
-acs-client open                            # 在中心开立账户（上传公钥 + 加密私钥副本）
-acs-client send <UID> <金额> --pass 'xxx'  # 本地签名一笔转账（写入 outbox）
-acs-client submit                          # 提交 outbox 交易到中心
-acs-client confirm --pass 'xxx'            # 确认/拒绝待确认交易（接收方）
-acs-client config --server <url>           # 运行期修改中心地址
-
-# 不带子命令 → 进入 TUI（首次启动引导注册；已有账户则出现登录屏）
+# 启动 Web 钱包：自动打开浏览器（关闭网页自动退出）
 acs-client
+# 首次打开：① 配置中心服务器（留空默认 https://acsystem.maxshin.top）→ ② 登录/注册
 ```
 
-**TUI 多账户登录**：注册时私钥以口令加密，加密副本上传中心；再次登录时输入账户密码——
-本地有缓存私钥直接解锁，没有则自动向中心取回并导入，多账户互不干扰、可跨设备恢复。
+**首次使用**：网页内第一步配置中心服务器；第二步登录（输入 UID+密码）或注册新账户（个人直接填 UID；国家/银行从已认定下拉列表选择）。
 
-**TUI 鼠标操作**（推荐）：点击左侧菜单切换视图，点击内容区顶部按钮 `Sync / Submit / Send / Help / Quit`
-完成同步、提交、转账、确认、设置；转账/设置通过弹窗表单输入（接收方、金额、口令等），操作结果以居中弹窗提示（自动换行）。
+**CLI 子命令**（脚本/调试用）：
+```powershell
+acs-client new --uid Steve --email Steve@aeu.org --pass 'xxx' --server http://127.0.0.1:9600
+acs-client status / sync / open / send / submit / confirm
+```
 
-### 4. 镜像
+### 4. 管理后台（成员认定 / 审计）
+
+根管理员（9680）登录后：
+- **账户** → 查询/冻结账户、管理后台管理员、**AEU 成员国家 / 银行认定**（双列面板，添加/撤销/删除）
+- **安全** → 铸造（发行）、根密钥解锁/导出
+- **镜像** → 镜像源 apikey、社区镜像登记
+- **审计** → 管理日志、交易总账单（密码解锁）
+
+金融部（finance）登录后：状态 / 银行账户 / **成员企业认定** / 审计。
+
+### 5. 镜像
 
 ```powershell
 acs-mirror config --server http://127.0.0.1:9600
@@ -132,7 +135,7 @@ acs-mirror serve --port 9090       # 只读 HTTP 查询服务
 
 > 镜像源社区化：同步免 apikey，客户端启动时自动测速选择最快镜像源。
 
-### 5. 运行测试
+### 6. 运行测试
 
 ```powershell
 cargo test -p acs-core
@@ -151,7 +154,7 @@ cargo test -p acs-core
 
 | 要点 | 做法 |
 |---|---|
-| **暴露哪个端口** | 只穿透 **9600**（公开 API：apikey 认证，无网页、无管理） |
+| **暴露哪个端口** | 只穿透 **9600**（公开 API：ed25519 签名校验、同步免 apikey，无网页、无管理） |
 | **管理后台 9680** | **绝不穿透**，保持 `127.0.0.1` 仅本机；远程管理走 SSH/RDP 隧道 |
 | **证书** | 用穿透服务商 AutoTLS（最简单）；或 TCP 透传 + 本地证书（`deploy/certs/generate.ps1`） |
 | **客户端** | `--server https://<穿透域名>`，走系统信任链校验，不跳过 |
@@ -193,7 +196,7 @@ certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
 - **私钥托管**：中心只存口令加密的私钥副本与口令哈希（`$salt$sha256`）；口令不明文存储、不传输，登录取回仅返回密文私钥，解密导入在本地完成。
 - **交易签名链**：发送方 ed25519 签名 → 中心验签并加签 → 接收方确认 → 写入双方哈希链。
 - **发行权**：收归理事会；中心密钥由理事长口令 AES-GCM 加密保管，`gpg.exe`（ed25519）签发身份。
-- **服务加固**：请求体 4MB、超时 30s、隐藏 Server 头、审计留痕。
+- **服务加固**：请求体 4MB、超时 30s、隐藏 Server 头、安全响应头（`Content-Security-Policy` / `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` / `Cache-Control: no-store`）、审计留痕。
 - **仓库安全**：`.gitignore` 排除私钥（`*.key`/`*.asc`）、数据库、`alpha_dir/`、`target/`、`.env`；
   默认密码不硬编码（环境变量 / 随机生成）。
 
@@ -216,10 +219,13 @@ certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
 
 | 现象 | 处理 |
 |---|---|
-| 同步失败/连不上中心 | 先本地 `http://127.0.0.1:9600` 验证服务；再查 frp 进程/Token/域名解析；可运行 `deploy/diagnose.bat` 六步诊断 |
+| 同步失败/连不上中心 | 先本地 `http://127.0.0.1:9600` 验证服务；再查 frp 进程/Token/域名解析 |
 | 管理后台公网访问不到 | 正常：9680 仅本机；远程管理请用 SSH/RDP 隧道 |
 | 浏览器提示"不安全" | 自签名证书未信任：`certutil -addstore -f Root cert.pem` 或换正式证书 |
 | client/mirror 连不上穿透域名 | 先本地 `http://127.0.0.1:9600` 验证服务正常；再查 frp 进程/Token/域名解析 |
+| 装完没弹 Gpg4win 向导 / 提示缺 gpg | 已装则跳过；未装则从 `{app}\tools\gpg4win-5.1.0.exe` 手动运行安装（勾选 GnuPG 核心 + Kleopatra） |
+| 注册 Country/Bank 提示"未认定" | 需根管理员/金融部先在后台「成员认定」添加该国家/银行 |
+| 注销账户后无法登录 | 正常：已注销账户状态为 `Deleted`，中心保留账本供审计，不可再登录 |
 | git commit 报 `gpg failed to sign the data` | 本机 gpg 不可用：`git -c commit.gpgsign=false commit ...` |
 
 ---
@@ -231,10 +237,9 @@ ACSystem/
 ├── Cargo.toml              # workspace（acs-core/server/client/mirror）
 ├── acs-core/               # 核心库（rlib + cdylib）
 ├── acs-server/             # 中心服务器（双端口 axum + 网页管理后台）
-├── acs-client/             # 钱包 TUI（鼠标菜单 + 多账户登录）/ CLI
+├── acs-client/             # Web GUI 钱包（内嵌网页 + 多账户登录）/ CLI
 ├── acs-mirror/             # 只读镜像
 ├── deploy/
-│   ├── diagnose.bat        # 六步诊断（本地端口 / frp / DNS / hosts / 443 / HTTPS 端点）
 │   ├── certs/generate.ps1  # 本地证书生成（TCP 透传端到端加密时用）
 │   └── nginx/nginx-acs.conf# 可选：nginx 反代旧方案（非必须）
 ├── packaging/              # 安装包脚本（.iss + Gpg4win 安装器；本地保留，不入库）
