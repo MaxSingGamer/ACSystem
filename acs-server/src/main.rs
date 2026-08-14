@@ -240,7 +240,7 @@ fn seed_default_admin(
     create_admin(conn, gpg, "admin", "root", &pwd)?;
     let path = cfg.data_dir.join("SYSTEM_LOGIN_PASSWORDS.txt");
     std::fs::write(&path, format!("admin={pwd}\n"))?;
-    println!("[acs-server] 默认管理员 admin 已创建，初始密码输出到 {}", path.display());
+    println!("[acs-server] 默认根管理员 admin 已创建，初始密码输出到 {}", path.display());
     Ok(())
 }
 
@@ -266,7 +266,8 @@ fn seed_admins_from_env(
             continue;
         }
         create_admin(conn, gpg, &a.uid, &a.role, &a.pwd)?;
-        println!("[acs-server] 管理员已创建: {} ({})", a.uid, a.role);
+        let label = if a.role == "root" { "根管理员" } else { "管理员" };
+        println!("[acs-server] {label} 已创建（密码只存哈希，首登须改密）");
     }
     Ok(())
 }
