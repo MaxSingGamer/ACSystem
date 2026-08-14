@@ -147,7 +147,7 @@ impl Wallet {
         Ok(gk)
     }
 
-    /// 初始化钱包元信息（首次引导完成后调用）。
+    /// 初始化钱包元信息（注册完成后调用）。
     pub fn init_wallet(&mut self, uid: &str, atype: AccountType, email: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         for (k, v) in [

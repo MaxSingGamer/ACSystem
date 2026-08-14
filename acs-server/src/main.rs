@@ -1,7 +1,7 @@
 //! acs-server：A€ 中心服务器（网页后台管理）。
 //!
-//! 启动：迁移旧库 → 种子默认根管理员（max_shin/mitra）→ 种子系统账户
-//! （PreIssuedAccount/AESystem/AlphaEU，导出私钥到 ./alpha_dir）→ 启动 Web。
+//! 启动：迁移旧库 → 按密码策略种子管理员/系统账户（无 .env 时默认 admin；
+//! 有 .env 时按文件定义创建，密码只存哈希）→ 启动 Web。
 
 mod api;
 mod auth;
@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("[acs-server] 公开 API（client/mirror）: http://{public_bind}:{public_port}");
     println!("[acs-server] 后台管理（仅内网）: http://{admin_bind}:{admin_port}");
-    println!("[acs-server] 默认根管理员: max_shin / mitra（首次登录须改密）");
+    println!("[acs-server] 账户种子：见 ~/.alpha_dir/.env（无配置时默认 admin，初始密码见 SYSTEM_LOGIN_PASSWORDS.txt）");
 
     let pub_handle = tokio::spawn(async move { axum::serve(public_listener, public_app).await });
     let adm_handle = tokio::spawn(async move { axum::serve(admin_listener, admin_app).await });

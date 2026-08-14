@@ -53,7 +53,7 @@ impl CoreConfig {
         let dir = data_dir.into();
         CoreConfig {
             gpg_bin: PathBuf::from("gpg.exe"),
-            // 与客户端（~/.alpha_dir/gnupg）隔离，避免同机共用冲突
+            // 与客户端（~/.alpha_dir/acs-client/gnupg）隔离，避免同机共用冲突
             gpg_homedir: dir.join("gnupg-server"),
             data_dir: dir.clone(),
             db_path: dir.join("alpha_center.db"),

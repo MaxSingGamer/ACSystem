@@ -1,7 +1,7 @@
 //! GnuPG（gpg.exe）封装。
 //!
 //! - 密钥为 ed25519（OpenPGP 格式），与 GnuPG 完全兼容，技术人员可用
-//!   `gpg --homedir <~/.alpha_dir/gnupg> --list-keys` 直接审查。
+//!   `gpg --homedir <~/.alpha_dir/acs-client/gnupg> --list-keys` 直接审查。
 //! - 私钥以"密码上锁"的 armored 格式导出（S2K+AES），可被 GnuPG 读取。
 //! - 交互通过 `--batch --pinentry-mode loopback --passphrase-fd 0` 传密码，避免卡交互。
 //! - 签名/验签的数据走临时文件，规避"密码与数据争用 stdin"的问题。

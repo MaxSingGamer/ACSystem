@@ -2,7 +2,7 @@
 
 > **ACSystem**：为 Minecraft 服务器组织 **AEU（Alpha Economy Union）** 提供可审计、可签名的 A€ 结算基础设施。
 > Rust workspace，四个 crate：核心库 / 中心服务器 / 钱包客户端 / 只读镜像。
-> 当前版本 **v2.0.0**。
+> 当前版本 **v2.1.0**。
 
 ---
 
@@ -93,10 +93,11 @@ cargo run -p acs-server
 #   [acs-server] 后台管理（仅内网）: http://127.0.0.1:9680
 ```
 
-首次启动会：迁移旧库 → 种子默认根管理员 → 种子系统账户
-（`PreIssuedAccount`/`AESystem`/`AlphaEU`，私钥统一导出到 `~/.alpha_dir/acs-server`）。
+首次启动会：迁移旧库 → 按密码策略种子管理员 / 系统账户（见下）。
 
-> 管理后台默认密码从环境变量 `ACS_ADMIN_PASSWORD` 读取；**未设置则随机生成 16 位强密码**并打印到日志。
+> **密码策略（v2.1.0）**
+> - **无 `~/.alpha_dir/.env`**：创建默认 `admin`（root 角色），随机密码输出到 `~/.alpha_dir/acs-server/SYSTEM_LOGIN_PASSWORDS.txt`；**不创建系统账户**。
+> - **有 `~/.alpha_dir/.env`**：自动**禁用默认 admin**；管理员按 `ACS_ADMIN_ACCOUNTS`（`uid:role:密码`）、系统账户按 `ACS_SYSTEM_ACCOUNTS`（`uid:密码`）创建；密码**只存哈希**、不输出明文。格式参考仓库根 `.env.example`。
 
 ### 3. 客户端（Alpha Wallet · Web GUI）
 
@@ -209,9 +210,10 @@ certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
 | `ACS_PUBLIC_BIND` | `0.0.0.0` | 公开 API 监听地址 |
 | `ACS_ADMIN_PORT` | `9680` | 后台管理端口 |
 | `ACS_ADMIN_BIND` | `127.0.0.1` | 后台管理监听地址（保持本机即不开放公网） |
-| `ACS_ADMIN_PASSWORD` | 随机生成 | 管理后台初始密码（登录后强制改密） |
 | `ACS_ALPHA_DIR` | `~/.alpha_dir` | 客户端钱包目录 |
 | `ACS_MIRROR_DIR` | `~/.alpha_mirror` | 镜像数据目录 |
+
+> 管理员 / 系统账户的初始密码通过 `~/.alpha_dir/.env` 定义（见「快速开始」密码策略）；登录后请立即修改。
 
 ---
 

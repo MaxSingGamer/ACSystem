@@ -2,7 +2,7 @@
 //!
 //! - 每个根管理员一把 gpg 密钥（AES 上锁存 admins 表）
 //! - 铸造（Mint）只可打入 PreIssuedAccount，需 root 先解锁自己的密钥
-//! - 密钥可导出到服务端 ./alpha_dir
+//! - 密钥可导出到服务端数据目录（~/.alpha_dir/acs-server）
 
 use axum::extract::State;
 use axum::routing::{get, post};
@@ -100,7 +100,7 @@ async fn key_lock(
     Ok(Json(json!({ "ok": true, "unlocked": false })))
 }
 
-/// 导出本人密钥（armored 私钥）到服务端 ./alpha_dir/<uid>.asc。
+/// 导出本人密钥（armored 私钥）到服务端数据目录 <uid>.asc（~/.alpha_dir/acs-server）。
 async fn key_export(
     State(st): State<AppState>,
     auth: AuthUser,

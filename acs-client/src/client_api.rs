@@ -194,7 +194,7 @@ pub fn submit_outbox(w: &Wallet, tx_id: Option<&str>) -> Result<Vec<(String, Str
 
 /// 查询待确认交易（作为接收方）。
 #[derive(Debug)]
-#[allow(dead_code)] // tx_type/timestamp 供 TUI 列表展示
+#[allow(dead_code)] // tx_type/timestamp 供列表展示使用
 pub struct PendingTx {
     pub tx_id: String,
     pub tx_type: String,
