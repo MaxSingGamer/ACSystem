@@ -20,7 +20,7 @@ async function api(path, opt = {}) {
 const $ = id => document.getElementById(id);
 const fmt = n => (n ?? 0).toLocaleString();
 const fmtA = n => fmt(Math.round((n ?? 0) * 100) / 100);
-const typeName = t => ({ System: '系统', Bank: '银行', Country: '国家', Individual: '个人' }[t] || t);
+const typeName = t => ({ System: '系统', Company: '企业', Country: '国家', Individual: '个人' }[t] || t);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const tsFmt = s => s ? new Date(s * 1000).toLocaleString('zh-CN', { hour12: false }) : '-';
 

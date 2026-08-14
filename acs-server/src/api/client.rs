@@ -31,11 +31,11 @@ pub fn routes() -> Router<AppState> {
         .route("/api/client/close", post(close_account))
 }
 
-/// 公开：返回 AEU 已认定的成员国家与银行（Active），供 client 注册下拉选择。
+/// 公开：返回 AEU 已认定的成员国家与企业（Active），供 client 注册下拉选择。
 async fn list_public_members(State(st): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let conn = st.db.lock().unwrap();
     let mut countries = Vec::new();
-    let mut banks = Vec::new();
+    let mut companies = Vec::new();
     {
         let mut stmt = conn
             .prepare("SELECT name FROM member_countries WHERE status='Active' ORDER BY name")
@@ -55,10 +55,10 @@ async fn list_public_members(State(st): State<AppState>) -> ApiResult<Json<serde
             .query_map([], |r| r.get::<_, String>(0))
             .map_err(ApiErr::from_err)?;
         for r in rows {
-            banks.push(r.map_err(ApiErr::from_err)?);
+            companies.push(r.map_err(ApiErr::from_err)?);
         }
     }
-    Ok(Json(json!({ "countries": countries, "banks": banks, "systems": ["PreIssuedAccount", "AESystem", "AlphaEU"] })))
+    Ok(Json(json!({ "countries": countries, "companies": companies, "systems": ["PreIssuedAccount", "AESystem", "AlphaEU"] })))
 }
 
 // ---------- 注销账户（中心侧：状态改 Deleted，账本只读保留） ----------
@@ -136,7 +136,7 @@ async fn open_account(
     if account::account_exists(&conn, &req.uid, atype)? {
         return Err(ApiErr::bad_request("账户已存在"));
     }
-    // Country/Bank 账户必须为 AEU 已认定成员（Active），否则拒绝开立
+    // Country/Company 账户必须为 AEU 已认定成员（Active），否则拒绝开立
     match atype {
         AccountType::Country => {
             let ok = conn
@@ -151,7 +151,7 @@ async fn open_account(
                 return Err(ApiErr::bad_request("该国家未经 AEU 理事会认定，无法开立国家账户"));
             }
         }
-        AccountType::Bank => {
+        AccountType::Company => {
             let ok = conn
                 .query_row(
                     "SELECT COUNT(*) FROM member_companies WHERE name=?1 AND status='Active'",
@@ -161,7 +161,7 @@ async fn open_account(
                 .unwrap_or(0)
                 > 0;
             if !ok {
-                return Err(ApiErr::bad_request("该银行未经 AEU 理事会认定，无法开立银行账户"));
+                return Err(ApiErr::bad_request("该企业未经 AEU 理事会认定，无法开立企业账户"));
             }
         }
         _ => {}
@@ -212,7 +212,7 @@ async fn fetch_key(
         vec![
             AccountType::Individual,
             AccountType::Country,
-            AccountType::Bank,
+            AccountType::Company,
             AccountType::System,
         ]
     } else {

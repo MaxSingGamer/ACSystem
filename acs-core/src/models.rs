@@ -11,7 +11,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AccountType {
     Country,
-    Bank,
+    Company, // 企业账户（银行/企业机构，原 Bank）
     Individual,
     System,
 }
@@ -20,7 +20,7 @@ impl AccountType {
     pub fn as_str(&self) -> &'static str {
         match self {
             AccountType::Country => "Country",
-            AccountType::Bank => "Bank",
+            AccountType::Company => "Company",
             AccountType::Individual => "Individual",
             AccountType::System => "System",
         }
@@ -30,7 +30,7 @@ impl AccountType {
     pub fn table_name(&self) -> &'static str {
         match self {
             AccountType::Country => "accounts_country",
-            AccountType::Bank => "accounts_bank",
+            AccountType::Company => "accounts_company",
             AccountType::Individual => "accounts_individual",
             AccountType::System => "accounts_system",
         }
@@ -39,7 +39,9 @@ impl AccountType {
     pub fn from_str(s: &str) -> Option<AccountType> {
         match s {
             "Country" => Some(AccountType::Country),
-            "Bank" => Some(AccountType::Bank),
+            "Company" => Some(AccountType::Company),
+            // 兼容旧客户端/旧数据中的 "Bank"（重命名前的企业账户）
+            "Bank" => Some(AccountType::Company),
             "Individual" => Some(AccountType::Individual),
             "System" => Some(AccountType::System),
             _ => None,

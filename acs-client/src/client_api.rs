@@ -81,7 +81,7 @@ pub fn fetch_key(
     }
 }
 
-/// 获取 AEU 已认定成员国家/银行（Active），供注册下拉选择。
+/// 获取 AEU 已认定成员国家/企业（Active），供注册下拉选择。
 pub fn fetch_members(w: &Wallet) -> Result<serde_json::Value> {
     let url = base(w)?;
     match shared_agent()

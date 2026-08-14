@@ -1,6 +1,6 @@
 //! 账本账户管理端点（网页不开放注册；仅状态管理）。
 //!
-//! 权限：root 管理所有类型；finance 仅 Bank。
+//! 权限：root 管理所有类型；finance 仅 Company。
 //! 转账（Transfer/Issue/Redeem）只能由 client 发起，网页不提供。
 
 use axum::extract::{Path, Query, State};
@@ -31,7 +31,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 fn can_manage(auth: &AuthUser, atype: AccountType) -> bool {
-    auth.is_root() || (auth.role == acs_core::models::AdminRole::Finance && atype == AccountType::Bank)
+    auth.is_root() || (auth.role == acs_core::models::AdminRole::Finance && atype == AccountType::Company)
 }
 
 #[derive(Deserialize)]

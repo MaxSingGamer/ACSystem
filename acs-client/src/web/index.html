@@ -165,7 +165,7 @@ function renderAuth(){
     <label>账户类型</label>
     <select id="auth-type" onchange="authTypeChange()">
       <option value="Individual">个人账户</option>
-      <option value="Bank">银行账户</option>
+      <option value="Company">企业账户（银行）</option>
       <option value="Country">国家账户</option>
       <option value="System">系统账户</option>
     </select>
@@ -197,9 +197,9 @@ function authTypeChange(){
   const t = sel.value;
   if(t === 'Individual'){
     wrap.innerHTML = `<label>账户 UID</label><input id="auth-uid" placeholder="如 Steve">`;
-  } else if(t === 'Bank'){
-    const opts = (memberLists.banks || []).map(c => `<option>${esc(c)}</option>`).join('');
-    wrap.innerHTML = `<label>银行名称（仅 AEU 已认定）</label><select id="auth-uid">${opts || '<option value="">（暂无已认定银行）</option>'}</select>`;
+  } else if(t === 'Company'){
+    const opts = (memberLists.companies || []).map(c => `<option>${esc(c)}</option>`).join('');
+    wrap.innerHTML = `<label>企业名称（仅 AEU 已认定）</label><select id="auth-uid">${opts || '<option value="">（暂无已认定企业）</option>'}</select>`;
   } else if(t === 'Country'){
     const opts = (memberLists.countries || []).map(c => `<option>${esc(c)}</option>`).join('');
     wrap.innerHTML = `<label>国家名称（仅 AEU 已认定）</label><select id="auth-uid">${opts || '<option value="">（暂无已认定国家）</option>'}</select>`;
@@ -323,19 +323,19 @@ async function runAction(act){
 }
 
 // ---------- 模态弹窗 ----------
-let memberLists = { countries: [], banks: [], systems: [] };
+let memberLists = { countries: [], companies: [], systems: [] };
 async function loadMembersCache(){
-  try { const r = await api('/api/members'); memberLists = { countries: r.countries || [], banks: r.banks || [], systems: r.systems || [] }; }
-  catch(e){ memberLists = { countries: [], banks: [], systems: [] }; }
+  try { const r = await api('/api/members'); memberLists = { countries: r.countries || [], companies: r.companies || [], systems: r.systems || [] }; }
+  catch(e){ memberLists = { countries: [], companies: [], systems: [] }; }
 }
 function regNameField(){
   const t = $('r-type').value, wrap = $('r-name-wrap');
   if(t === 'Country'){
     const opts = memberLists.countries.map(c => `<option>${esc(c)}</option>`).join('');
     wrap.innerHTML = `<label>国家名称（仅 AEU 已认定）</label><select id="r-uid">${opts || '<option value="">（暂无已认定国家）</option>'}</select>`;
-  } else if(t === 'Bank'){
-    const opts = memberLists.banks.map(c => `<option>${esc(c)}</option>`).join('');
-    wrap.innerHTML = `<label>银行名称（仅 AEU 已认定）</label><select id="r-uid">${opts || '<option value="">（暂无已认定银行）</option>'}</select>`;
+  } else if(t === 'Company'){
+    const opts = memberLists.companies.map(c => `<option>${esc(c)}</option>`).join('');
+    wrap.innerHTML = `<label>企业名称（仅 AEU 已认定）</label><select id="r-uid">${opts || '<option value="">（暂无已认定企业）</option>'}</select>`;
   } else {
     wrap.innerHTML = `<label>UID（唯一识别符）</label><input id="r-uid" placeholder="如 Steve">`;
   }
@@ -345,7 +345,7 @@ function renderRegisterModal(){
   body.innerHTML = `
     <div class="field"><label>账户类型</label><select id="r-type" onchange="regNameField()">
       <option value="Individual">个人账户</option>
-      <option value="Bank">银行账户</option>
+      <option value="Company">企业账户（银行）</option>
       <option value="Country">国家账户</option>
     </select></div>
     <div class="field" id="r-name-wrap"></div>

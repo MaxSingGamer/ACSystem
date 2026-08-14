@@ -52,7 +52,7 @@
       <h2>A€ 账户</h2>
       <div class="row">
         <select id="accType" style="width:180px">
-          <option>Country</option><option>Bank</option><option>Individual</option><option>System</option>
+          <option>Country</option><option>Company</option><option>Individual</option><option>System</option>
         </select>
         <input id="accSearch" placeholder="搜索 UID" style="width:220px" onkeydown="if(event.key==='Enter')loadAccounts()">
         <button class="btn-primary btn-sm" onclick="loadAccounts()">查询</button>
@@ -75,7 +75,7 @@
     </div>
     <div class="panel">
       <h2>AEU 成员认定</h2>
-      <div class="muted" style="margin-bottom:14px">此处认定的成员国家 / 银行，客户端注册 Country / Bank 账户时只能从中选择。</div>
+      <div class="muted" style="margin-bottom:14px">此处认定的成员国家 / 企业，客户端注册 Country / Company 账户时只能从中选择。</div>
       <div class="mem-grid">
         <div class="mem-col">
           <h3>成员国家 <span class="muted">（Country 账户可选）</span></h3>
@@ -87,9 +87,9 @@
           <tbody id="countryBody"></tbody></table>
         </div>
         <div class="mem-col">
-          <h3>成员银行 <span class="muted">（Bank 账户可选）</span></h3>
+          <h3>成员企业 <span class="muted">（Company 账户可选）</span></h3>
           <div class="row">
-            <input id="bankName" placeholder="银行名称（如 AEU 银行）">
+            <input id="bankName" placeholder="企业名称（如 AEU 银行）">
             <button class="btn-primary btn-sm" onclick="createMember('companies')">添加</button>
           </div>
           <table><thead><tr><th>ID</th><th>名称</th><th>状态</th><th>操作</th></tr></thead>

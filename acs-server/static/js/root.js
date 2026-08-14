@@ -22,7 +22,7 @@ async function loadOverview() {
   $('sTotal').textContent = fmtA(d.total_flow) + ' A€';
   $('sTotalC').textContent = d.total_count;
   const ac = d.accounts || {};
-  $('sAccounts').textContent = ['Country','Bank','Individual','System']
+  $('sAccounts').textContent = ['Country','Company','Individual','System']
     .map(k => `${k} ${ac[k] ?? 0}`).join(' · ');
 }
 

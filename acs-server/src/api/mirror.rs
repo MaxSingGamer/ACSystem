@@ -100,7 +100,7 @@ fn build_snapshot(conn: &Connection, since: i64) -> Result<(serde_json::Value, S
     }
 
     let mut accounts = Vec::new();
-    for at in [AccountType::Country, AccountType::Bank, AccountType::Individual, AccountType::System] {
+    for at in [AccountType::Country, AccountType::Company, AccountType::Individual, AccountType::System] {
         let table = at.table_name();
         let mut astmt = conn
             .prepare(&format!("SELECT uid, balance, status, last_tx_hash, changed_at FROM {table}"))

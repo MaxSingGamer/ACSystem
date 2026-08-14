@@ -196,7 +196,7 @@ fn cmd_new(
         }
     };
     let atype = acs_core::models::AccountType::from_str(&typ)
-        .ok_or_else(|| anyhow!("无效账户类型：{typ}（Individual/Bank/Country）"))?;
+        .ok_or_else(|| anyhow!("无效账户类型：{typ}（Individual/Company/Country）"))?;
 
     // 中心服务器地址：必填（缺省时交互输入），自动补全协议前缀
     let server = match server {

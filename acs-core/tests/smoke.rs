@@ -144,11 +144,11 @@ fn account_types_route_to_own_tables() -> Result<()> {
     let conn = rusqlite::Connection::open_in_memory()?;
     db::init_central(&conn)?;
     account::create_account(&conn, &acc("GPC", AccountType::Country))?;
-    account::create_account(&conn, &acc("AlphaBank", AccountType::Bank))?;
+    account::create_account(&conn, &acc("AlphaCompany", AccountType::Company))?;
     account::create_account(&conn, &acc("Shin", AccountType::Individual))?;
     account::create_account(&conn, &acc("PreIssuedAccount", AccountType::System))?;
 
-    for at in [AccountType::Country, AccountType::Bank, AccountType::Individual, AccountType::System] {
+    for at in [AccountType::Country, AccountType::Company, AccountType::Individual, AccountType::System] {
         let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {}", at.table_name()), [], |r| r.get(0))?;
         assert_eq!(n, 1, "表 {} 应有 1 行", at.table_name());
     }
@@ -171,5 +171,52 @@ fn list_pending_for_receiver() -> Result<()> {
     assert_eq!(pending.len(), 1);
     let none = transaction::list_pending_for(&conn, "Alice", AccountType::Individual)?;
     assert_eq!(none.len(), 0);
+    Ok(())
+}
+
+#[test]
+fn migrate_bank_to_company() -> Result<()> {
+    // 构造旧库：accounts_bank 表 + account_credentials/transactions 中的 'Bank' 类型字符串
+    let mut conn = rusqlite::Connection::open_in_memory()?;
+    conn.execute_batch(
+        "CREATE TABLE accounts_bank(
+            uid TEXT PRIMARY KEY, email TEXT NOT NULL,
+            pubkey TEXT NOT NULL, encrypted_seckey TEXT NOT NULL,
+            balance INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Active',
+            last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL);
+         INSERT INTO accounts_bank(uid,email,pubkey,encrypted_seckey,balance,status,created_at,changed_at)
+            VALUES('AlphaCompany','a@qq.com','pk','sk',42,'Active',1,1);
+         CREATE TABLE account_credentials(uid TEXT, type TEXT, password_hash TEXT, PRIMARY KEY(uid,type));
+         INSERT INTO account_credentials VALUES('AlphaCompany','Bank','hash');
+         CREATE TABLE transactions(
+            tx_id TEXT PRIMARY KEY, tx_type TEXT NOT NULL,
+            sender TEXT NOT NULL, sender_type TEXT NOT NULL,
+            receiver TEXT NOT NULL, receiver_type TEXT NOT NULL,
+            amount INTEGER NOT NULL, ts INTEGER NOT NULL,
+            tx_hash TEXT NOT NULL, sender_sig TEXT NOT NULL,
+            central_sig TEXT, sender_last_hash TEXT, receiver_last_hash TEXT,
+            status TEXT NOT NULL DEFAULT 'Pending');
+         INSERT INTO transactions(tx_id,tx_type,sender,sender_type,receiver,receiver_type,amount,ts,tx_hash,sender_sig,status)
+            VALUES('t1','Transfer','AlphaCompany','Bank','Alice','Individual',1,1,'h','s','Pending');",
+    )?;
+    // 模拟升级：新 schema 建表（创建 accounts_company）+ 迁移
+    db::init_central(&conn)?;
+    db::migrate_center(&conn)?;
+    // accounts_bank 已删除，数据进入 accounts_company
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM accounts_company", [], |r| r.get(0))?;
+    assert_eq!(n, 1, "accounts_company 应有 1 行");
+    let bal: i64 = conn.query_row("SELECT balance FROM accounts_company WHERE uid='AlphaCompany'", [], |r| r.get(0))?;
+    assert_eq!(bal, 42);
+    let table_bank: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts_bank'",
+        [], |r| r.get(0))?;
+    assert_eq!(table_bank, 0, "accounts_bank 应已删除");
+    // 类型字符串迁移
+    let cred_type: String = conn.query_row(
+        "SELECT type FROM account_credentials WHERE uid='AlphaCompany'", [], |r| r.get(0))?;
+    assert_eq!(cred_type, "Company");
+    let s_type: String = conn.query_row(
+        "SELECT sender_type FROM transactions WHERE tx_id='t1'", [], |r| r.get(0))?;
+    assert_eq!(s_type, "Company");
     Ok(())
 }

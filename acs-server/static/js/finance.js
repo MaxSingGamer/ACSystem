@@ -29,10 +29,10 @@ async function loadDaily(days) {
   drawLineChart('dailyChart', items.map(x => ({ date: x.date, flow: Number(x.flow) })));
 }
 
-/* ---------- 银行账户 ---------- */
+/* ---------- 企业账户（银行） ---------- */
 async function loadAccounts() {
   const q = $('accSearch').value.trim();
-  const d = await api(`/api/accounts?atype=Bank&search=${encodeURIComponent(q)}`);
+  const d = await api(`/api/accounts?atype=Company&search=${encodeURIComponent(q)}`);
   const rows = d.items || [];
   $('accBody').innerHTML = rows.map(a => `
     <tr>
@@ -47,7 +47,7 @@ async function loadAccounts() {
     </tr>`).join('') || '<tr><td colspan="5" class="muted">无记录</td></tr>';
 }
 async function accAction(uid, act) {
-  await api(`/api/accounts/Bank/${encodeURIComponent(uid)}/${act}`, { method: 'POST' });
+  await api(`/api/accounts/Company/${encodeURIComponent(uid)}/${act}`, { method: 'POST' });
   loadAccounts();
 }
 

@@ -63,7 +63,7 @@ async fn overview(
         .map_err(ApiErr::from_err)?;
 
     let mut accounts = serde_json::Map::new();
-    for at in [AccountType::Country, AccountType::Bank, AccountType::Individual, AccountType::System] {
+    for at in [AccountType::Country, AccountType::Company, AccountType::Individual, AccountType::System] {
         let n: i64 = conn
             .query_row(&format!("SELECT COUNT(*) FROM {}", at.table_name()), [], |r| r.get(0))
             .map_err(ApiErr::from_err)?;
