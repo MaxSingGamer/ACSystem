@@ -46,13 +46,13 @@ async function loadAccounts() {
       <td class="ops">
         ${a.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="accAction('${atype}','${esc(a.uid)}','freeze')">冻结</button>` : ''}
         ${a.status === 'Frozen' ? `<button class="btn-sm btn-secondary" onclick="accAction('${atype}','${esc(a.uid)}','unfreeze')">解冻</button>` : ''}
-        <button class="btn-sm btn-danger" onclick="accAction('${atype}','${esc(a.uid)}','delete')">删除</button>
+        ${a.status !== 'Deleted' ? `<button class="btn-sm btn-danger" onclick="accAction('${atype}','${esc(a.uid)}','delete')">注销</button>` : ''}
       </td>
     </tr>`).join('') || '<tr><td colspan="5" class="muted">无记录</td></tr>';
 }
 
 async function accAction(atype, uid, act) {
-  if (act === 'delete' && !confirm(`确定删除账户 ${uid}？`)) return;
+  if (act === 'delete' && !confirm(`确定注销账户 ${uid}？（状态改为 Deleted，账本只读保留供审计，不可逆）`)) return;
   const url = `/api/accounts/${atype}/${encodeURIComponent(uid)}` + (act === 'delete' ? '' : '/' + act);
   await api(url, { method: act === 'delete' ? 'DELETE' : 'POST' });
   loadAccounts();
@@ -70,7 +70,6 @@ async function loadAdmins() {
         <button class="btn-sm btn-secondary" onclick="showChg('${esc(a.uid)}')">重置密码</button>
         ${a.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="adminToggle(${a.id},'disable')">停用</button>` : ''}
         ${a.status === 'Disabled' ? `<button class="btn-sm btn-secondary" onclick="adminToggle(${a.id},'enable')">启用</button>` : ''}
-        <button class="btn-sm btn-danger" onclick="adminDel(${a.id})">删除</button>
       </td>
     </tr>`).join('') || '<tr><td colspan="4" class="muted">无记录</td></tr>';
 }
@@ -84,7 +83,6 @@ async function createAdmin() {
 }
 
 async function adminToggle(id, act) { await api(`/api/admins/${id}/${act}`, { method: 'POST' }); loadAdmins(); }
-async function adminDel(id) { if (!confirm(`确定删除该管理员？`)) return; await api(`/api/admins/${id}`, { method: 'DELETE' }); loadAdmins(); }
 
 /* ---------- 成员国家 / 银行认定 ---------- */
 async function loadMembers() {

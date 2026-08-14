@@ -16,6 +16,7 @@ use acs_core::gpg::GpgUtil;
 use acs_core::models::{Account, AccountStatus, AccountType};
 use axum::http::header;
 use axum::Router;
+use std::path::PathBuf;
 
 use state::AppState;
 use tower_http::{
@@ -45,9 +46,7 @@ async fn main() -> anyhow::Result<()> {
     db::init_central(&conn)?;
     state::init_server_db(&conn)?;
     db::migrate_center(&conn)?;
-    seed_default_admins(&conn, &gpg)?;
-    seed_system_accounts(&conn, &gpg, &cfg)?;
-    init_system_credentials(&conn, &cfg)?;
+    seed_from_config(&conn, &gpg, &cfg)?;
 
     let state = AppState::new(conn, gpg);
     // 网络安全加固（两服务共用）：
@@ -135,75 +134,198 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 首次启动种子两个根管理员：max_shin（理事长）、mitra（副理事长）。
-fn seed_default_admins(conn: &rusqlite::Connection, gpg: &GpgUtil) -> anyhow::Result<()> {
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM admins", [], |r| r.get(0))?;
-    if n > 0 {
-        return Ok(());
-    }
-    // 初始密码：优先环境变量 ACS_ADMIN_PASSWORD；未设置则随机生成并在日志打印一次
-    // （安全：源码不硬编码密码；首次登录强制改密 must_change_password=1）
-    let default_pwd = std::env::var("ACS_ADMIN_PASSWORD").unwrap_or_else(|_| {
-        const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*";
-        let p: String = (0..16)
-            .map(|_| CHARS[rand::random::<usize>() % CHARS.len()] as char)
-            .collect();
-        println!("[acs-server] 未设置 ACS_ADMIN_PASSWORD，随机初始密码: {p}（首次登录须改密）");
-        p
-    });
-    for uid in ["max_shin", "mitra"] {
-        let salt = uuid::Uuid::new_v4().to_string();
-        let pw = auth::hash_password(&default_pwd, &salt);
-        let pw_hash = format!("{salt}${pw}");
-        conn.execute(
-            "INSERT INTO admins(uid, role, password_hash, must_change_password, pubkey, encrypted_seckey, fingerprint, key_passphrase_enc, status, created_at) \
-             VALUES (?1,'root',?2,1,'','','','','Active',?3)",
-            rusqlite::params![uid, pw_hash, chrono::Utc::now().timestamp()],
-        )?;
-        let id: i64 = conn.query_row("SELECT id FROM admins WHERE uid=?1", rusqlite::params![uid], |r| r.get(0))?;
-        auth::ensure_admin_keys(conn, gpg, id, uid, &default_pwd)?;
-        println!("[acs-server] 根管理员已创建: {uid}");
-    }
-    Ok(())
+// ---------- 账户种子（v2.1.0 密码策略） ----------
+
+/// .env 定义的管理员账户种子。
+struct AdminSeed {
+    uid: String,
+    role: String,
+    pwd: String,
 }
 
-/// 种子系统账户：PreIssuedAccount / AESystem / AlphaEU（首启自动生成密钥并导出私钥到数据目录）。
-fn seed_system_accounts(
+/// .env 定义的系统账户种子。
+struct SystemSeed {
+    uid: String,
+    pwd: String,
+}
+
+/// 账户配置（来自 ~/.alpha_dir/.env）。
+struct EnvConfig {
+    admins: Vec<AdminSeed>,
+    systems: Vec<SystemSeed>,
+}
+
+/// .env 文件路径：~/.alpha_dir/.env。
+fn alpha_dir_env_path() -> PathBuf {
+    CoreConfig::default_alpha_dir().join(".env")
+}
+
+/// 读取 ~/.alpha_dir/.env 中的账户定义。无文件或无定义返回 None。
+fn load_env_config() -> Option<EnvConfig> {
+    let content = std::fs::read_to_string(alpha_dir_env_path()).ok()?;
+    let mut admins = Vec::new();
+    let mut systems = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let (key, value) = (key.trim(), value.trim());
+        match key {
+            // uid:role:密码，多个用逗号分隔
+            "ACS_ADMIN_ACCOUNTS" => {
+                for item in value.split(',') {
+                    let parts: Vec<&str> = item.split(':').collect();
+                    if parts.len() >= 3 {
+                        admins.push(AdminSeed {
+                            uid: parts[0].trim().to_string(),
+                            role: parts[1].trim().to_string(),
+                            pwd: parts[2].trim().to_string(),
+                        });
+                    }
+                }
+            }
+            // uid:密码，多个用逗号分隔
+            "ACS_SYSTEM_ACCOUNTS" => {
+                for item in value.split(',') {
+                    if let Some((u, p)) = item.split_once(':') {
+                        systems.push(SystemSeed {
+                            uid: u.trim().to_string(),
+                            pwd: p.trim().to_string(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if admins.is_empty() && systems.is_empty() {
+        None
+    } else {
+        Some(EnvConfig { admins, systems })
+    }
+}
+
+/// 统一种子入口：
+/// - 无 .env：默认 admin（随机密码输出 txt），不创建系统账户
+/// - 有 .env：禁用默认 admin，按 .env 创建管理员 + 系统账户（密码只存哈希，不输出 txt）
+fn seed_from_config(
     conn: &rusqlite::Connection,
     gpg: &GpgUtil,
     cfg: &CoreConfig,
 ) -> anyhow::Result<()> {
-    // 系统账户私钥统一导出到服务器数据目录（~/.alpha_dir/acs-server）
-    let alpha_dir = cfg.data_dir.clone();
-    std::fs::create_dir_all(&alpha_dir)?;
-    // 生成主密钥（用于加密系统账户 passphrase 文件）
-    let master_key = ensure_master_key(cfg)?;
+    match load_env_config() {
+        None => seed_default_admin(conn, gpg, cfg)?,
+        Some(conf) => {
+            disable_default_admin(conn)?;
+            seed_admins_from_env(conn, gpg, &conf.admins)?;
+            seed_systems_from_env(conn, gpg, cfg, &conf.systems)?;
+        }
+    }
+    Ok(())
+}
 
-    for (uid, kind) in [
-        ("PreIssuedAccount", "MintTarget"),
-        ("AESystem", "StockSystem"),
-        ("AlphaEU", "OrgPool"),
-    ] {
-        if account::account_exists(conn, uid, AccountType::System)? {
+/// 无配置：创建默认 admin（root），随机密码输出到 SYSTEM_LOGIN_PASSWORDS.txt。
+fn seed_default_admin(
+    conn: &rusqlite::Connection,
+    gpg: &GpgUtil,
+    cfg: &CoreConfig,
+) -> anyhow::Result<()> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM admins", [], |r| r.get(0))?;
+    if n > 0 {
+        return Ok(());
+    }
+    let pwd = random_password();
+    create_admin(conn, gpg, "admin", "root", &pwd)?;
+    let path = cfg.data_dir.join("SYSTEM_LOGIN_PASSWORDS.txt");
+    std::fs::write(&path, format!("admin={pwd}\n"))?;
+    println!("[acs-server] 默认管理员 admin 已创建，初始密码输出到 {}", path.display());
+    Ok(())
+}
+
+/// 有配置：完全禁用默认 admin 账户。
+fn disable_default_admin(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    conn.execute("UPDATE admins SET status='Disabled' WHERE uid='admin'", [])?;
+    Ok(())
+}
+
+/// 有配置：按 .env 创建管理员（已存在则跳过）。
+fn seed_admins_from_env(
+    conn: &rusqlite::Connection,
+    gpg: &GpgUtil,
+    admins: &[AdminSeed],
+) -> anyhow::Result<()> {
+    for a in admins {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM admins WHERE uid=?1",
+            rusqlite::params![a.uid],
+            |r| r.get(0),
+        )?;
+        if exists > 0 {
             continue;
         }
-        let pass = uuid::Uuid::new_v4().to_string();
-        let gk = gpg
-            .generate_key(&format!("{uid} <{uid}@maxshin.top>"), &pass)
-            .map_err(|e| anyhow::anyhow!("生成系统账户密钥失败 {uid}: {e}"))?;
-        // 导出私钥到 ./alpha_dir
-        let asc = alpha_dir.join(format!("{uid}.asc"));
-        std::fs::write(&asc, &gk.encrypted_seckey)?;
-        // 加密保存 passphrase（用主密钥）
-        let key_enc = crypto::encrypt_secret(&master_key, &pass);
-        std::fs::write(alpha_dir.join(format!("{uid}.key")), key_enc)?;
+        create_admin(conn, gpg, &a.uid, &a.role, &a.pwd)?;
+        println!("[acs-server] 管理员已创建: {} ({})", a.uid, a.role);
+    }
+    Ok(())
+}
 
+/// 创建管理员（密码只存哈希，首登强制改密，生成管理员 gpg 密钥）。
+fn create_admin(
+    conn: &rusqlite::Connection,
+    gpg: &GpgUtil,
+    uid: &str,
+    role: &str,
+    pwd: &str,
+) -> anyhow::Result<()> {
+    let salt = uuid::Uuid::new_v4().to_string();
+    let pw_hash = format!("{salt}${}", auth::hash_password(pwd, &salt));
+    conn.execute(
+        "INSERT INTO admins(uid, role, password_hash, must_change_password, pubkey, encrypted_seckey, fingerprint, key_passphrase_enc, status, created_at) \
+         VALUES (?1,?2,?3,1,'','','','','Active',?4)",
+        rusqlite::params![uid, role, pw_hash, chrono::Utc::now().timestamp()],
+    )?;
+    let id: i64 = conn.query_row("SELECT id FROM admins WHERE uid=?1", rusqlite::params![uid], |r| r.get(0))?;
+    auth::ensure_admin_keys(conn, gpg, id, uid, pwd)?;
+    Ok(())
+}
+
+fn random_password() -> String {
+    const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*";
+    (0..16)
+        .map(|_| CHARS[rand::random::<usize>() % CHARS.len()] as char)
+        .collect()
+}
+
+/// 有配置：按 .env 创建系统账户（密码=私钥口令，登录凭证只存哈希，不输出 txt）。
+fn seed_systems_from_env(
+    conn: &rusqlite::Connection,
+    gpg: &GpgUtil,
+    cfg: &CoreConfig,
+    systems: &[SystemSeed],
+) -> anyhow::Result<()> {
+    let alpha_dir = cfg.data_dir.clone();
+    std::fs::create_dir_all(&alpha_dir)?;
+    let master_key = ensure_master_key(cfg)?;
+    for s in systems {
+        if account::account_exists(conn, &s.uid, AccountType::System)? {
+            continue;
+        }
+        let gk = gpg
+            .generate_key(&format!("{} <{}@maxshin.top>", s.uid, s.uid), &s.pwd)
+            .map_err(|e| anyhow::anyhow!("生成系统账户密钥失败 {}: {e}", s.uid))?;
+        // 导出加密私钥 + 用主密钥加密 passphrase（本地备份，供技术人员审查）
+        std::fs::write(alpha_dir.join(format!("{}.asc", s.uid)), &gk.encrypted_seckey)?;
+        let key_enc = crypto::encrypt_secret(&master_key, &s.pwd);
+        std::fs::write(alpha_dir.join(format!("{}.key", s.uid)), key_enc)?;
+        // 创建账户
         account::create_account(
             conn,
             &Account {
-                uid: uid.to_string(),
+                uid: s.uid.clone(),
                 account_type: AccountType::System,
-                email: format!("{uid}@maxshin.top"),
+                email: format!("{}@maxshin.top", s.uid),
                 pubkey: gk.pubkey,
                 encrypted_seckey: gk.encrypted_seckey,
                 balance: 0,
@@ -213,7 +335,15 @@ fn seed_system_accounts(
                 changed_at: chrono::Utc::now(),
             },
         )?;
-        println!("[acs-server] 系统账户已创建: {uid} ({kind}), 私钥已导出到 {}", asc.display());
+        // 存登录凭证（只存哈希）
+        let salt = uuid::Uuid::new_v4().to_string();
+        let ph = format!("{salt}${}", auth::hash_password(&s.pwd, &salt));
+        conn.execute(
+            "INSERT INTO account_credentials(uid, type, password_hash) VALUES (?1,'System',?2) \
+             ON CONFLICT(uid,type) DO UPDATE SET password_hash=excluded.password_hash",
+            rusqlite::params![s.uid, ph],
+        )?;
+        println!("[acs-server] 系统账户已创建: {}（登录凭证只存哈希）", s.uid);
     }
     Ok(())
 }
@@ -227,46 +357,4 @@ fn ensure_master_key(cfg: &CoreConfig) -> anyhow::Result<String> {
     let key = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string();
     std::fs::write(&path, &key)?;
     Ok(key)
-}
-
-/// 初始化系统账户登录凭证：用现有私钥 passphrase 作为登录密码（密码=私钥口令，
-/// 与一般账户一致，登录后可直接签名），写入 account_credentials；密码输出到
-/// 数据目录 SYSTEM_LOGIN_PASSWORDS.txt（仅首次初始化时写一次）。
-fn init_system_credentials(
-    conn: &rusqlite::Connection,
-    cfg: &CoreConfig,
-) -> anyhow::Result<()> {
-    let master_key = ensure_master_key(cfg)?;
-    let mut pw_lines = String::new();
-    for uid in ["PreIssuedAccount", "AESystem", "AlphaEU"] {
-        // 已有登录凭证则跳过
-        let exists: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM account_credentials WHERE uid=?1 AND type='System'",
-            rusqlite::params![uid],
-            |r| r.get(0),
-        )?;
-        if exists > 0 {
-            continue;
-        }
-        // 用现有私钥 passphrase 作为登录密码（读 .key 用主密钥解密）
-        let key_enc = std::fs::read_to_string(cfg.data_dir.join(format!("{uid}.key")))?;
-        let pwd = crypto::decrypt_secret(&key_enc, &master_key)
-            .map_err(|e| anyhow::anyhow!("解密系统账户 {uid} passphrase 失败: {e}"))?;
-        // 存登录凭证（$salt$sha256）
-        let salt = uuid::Uuid::new_v4().to_string();
-        let ph = format!("{salt}${}", auth::hash_password(&pwd, &salt));
-        conn.execute(
-            "INSERT INTO account_credentials(uid, type, password_hash) VALUES (?1,'System',?2) \
-             ON CONFLICT(uid,type) DO UPDATE SET password_hash=excluded.password_hash",
-            rusqlite::params![uid, ph],
-        )?;
-        pw_lines.push_str(&format!("{uid}={pwd}\n"));
-        println!("[acs-server] 系统账户登录凭证已初始化: {uid}");
-    }
-    if !pw_lines.is_empty() {
-        let path = cfg.data_dir.join("SYSTEM_LOGIN_PASSWORDS.txt");
-        std::fs::write(&path, pw_lines)?;
-        println!("[acs-server] 系统账户登录密码已写入: {}", path.display());
-    }
-    Ok(())
 }

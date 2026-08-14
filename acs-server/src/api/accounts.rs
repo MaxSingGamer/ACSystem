@@ -6,7 +6,6 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -162,19 +161,14 @@ async fn delete_account(
     Path((atype_s, uid)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if !auth.is_root() {
-        return Err(ApiErr::forbidden("仅根管理员可删除账户"));
+        return Err(ApiErr::forbidden("仅根管理员可注销账户"));
     }
     let atype = AccountType::from_str(&atype_s).ok_or_else(|| ApiErr::bad_request("未知账户类型"))?;
     let conn = st.db.lock().unwrap();
-    let table = atype.table_name();
-    let n = conn
-        .execute(&format!("DELETE FROM {table} WHERE uid=?1"), params![uid])
-        .map_err(ApiErr::from_err)?;
-    if n == 0 {
-        return Err(ApiErr::not_found("账户不存在"));
-    }
-    log_audit(&conn, &auth.username, "delete_account", &format!("{} {}", atype.as_str(), uid));
-    Ok(Json(json!({ "ok": true })))
+    // 软删除：状态改为 Deleted（账户信息与账本只读保留，供审计），而非物理删除
+    account::set_status(&conn, &uid, atype, AccountStatus::Deleted).map_err(ApiErr::from)?;
+    log_audit(&conn, &auth.username, "delete_account", &format!("注销账户: {} {}", atype.as_str(), uid));
+    Ok(Json(json!({ "ok": true, "uid": uid, "status": "Deleted" })))
 }
 
 #[derive(Deserialize)]
