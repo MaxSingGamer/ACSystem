@@ -114,7 +114,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const V = '2.1.0';
+const V = '2.2.0';
 let state = { logged_in:false };
 let view = 'home';
 let selectedUid = null;
@@ -231,7 +231,7 @@ const MENU = [
 const ACTIONS = {
   home: [['sync','同步'],['transfer','转账'],['refresh','刷新']],
   accounts: [['sync','同步'],['switch','切换账户'],['register','注册新账户'],['delete','注销账户']],
-  txs: [['transfer','转账'],['confirm','确认收款'],['submit','提交待确认']],
+  txs: [['transfer','转账'],['confirm','确认/拒收'],['submit','提交待确认']],
   outbox: [['submit','全部提交'],['refresh','刷新']],
   settings: [['setserver','中心地址'],['logout','返回登录']]
 };
@@ -363,7 +363,9 @@ function renderRegisterModal(){
 
 function openModal(kind, data){
   const title = $('modal-title'), body = $('modal-body'), err = $('modal-error');
+  const ok = $('modal-ok'), cancel = $('modal-cancel');
   err.textContent = '';
+  ok.classList.remove('hidden'); ok.textContent = '确定';
   if(kind==='register'){
     $('modal-title').textContent = '注册新账户';
     body.innerHTML = '<p class="muted">正在加载已认定成员列表…</p>';
@@ -377,8 +379,14 @@ function openModal(kind, data){
       <div class="field"><label>金额（A€）</label><input id="f-amt" type="number" min="1" placeholder="0"></div>
       <div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
   } else if(kind==='confirm'){
-    html = `<div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>
-      <p class="muted">将确认接收方收到的第一笔待确认交易。</p>`;
+    // 待确认列表（接受/拒收）
+    $('modal-title').textContent = '确认 / 拒收';
+    body.innerHTML = '<p class="muted">正在加载待确认交易…</p>';
+    $('modal-wrap').classList.remove('hidden');
+    ok.classList.add('hidden');
+    cancel.onclick = closeModal;
+    loadPendingList();
+    return;
   } else if(kind==='setserver'){
     html = `<div class="field"><label>中心地址</label><input id="f-url" placeholder="https://acsystem.maxshin.top" value="${esc(data.url||'')}"></div>`;
   } else if(kind==='close'){
@@ -389,7 +397,6 @@ function openModal(kind, data){
   $('modal-title').textContent = kind==='transfer'?'转账':(kind==='confirm'?'确认收款':(kind==='setserver'?'设置中心地址':'注销账户'));
   body.innerHTML = html;
   $('modal-wrap').classList.remove('hidden');
-  const ok = $('modal-ok'), cancel = $('modal-cancel');
   ok.onclick = async () => {
     if(kind==='transfer'){
       const r = await api('/api/transfer', { to:$('f-to').value, amount:parseInt($('f-amt').value||'0'), password:$('f-pass').value });
@@ -408,6 +415,55 @@ function openModal(kind, data){
   cancel.onclick = closeModal;
 }
 function closeModal(){ $('modal-wrap').classList.add('hidden'); }
+
+// 待确认交易列表（接受 / 拒收）
+let pendingList = [];
+async function loadPendingList(){
+  const body = $('modal-body'), err = $('modal-error');
+  try {
+    const r = await api('/api/pending');
+    pendingList = r.items || [];
+  } catch(e){ pendingList = []; }
+  if(!pendingList.length){
+    body.innerHTML = '<p class="muted">当前没有待确认交易。</p>';
+    return;
+  }
+  body.innerHTML = `<table><thead><tr><th>发送方</th><th>类型</th><th>金额</th><th>时间</th><th>操作</th></tr></thead><tbody>` +
+    pendingList.map((it,i)=>`<tr>
+        <td class="mono">${esc(it.sender)}</td><td>${esc(it.tx_type)}</td>
+        <td class="mono">${it.amount} A€</td><td>${fmtTs(it.timestamp)}</td>
+        <td><button class="btn ok" data-i="${i}" data-act="accept">接受</button>
+            <button class="btn danger" data-i="${i}" data-act="reject">拒收</button></td>
+      </tr>`).join('') + `</tbody></table>`;
+  body.querySelectorAll('button[data-act]').forEach(b=>{
+    b.onclick = () => pendingAction(+b.dataset.i, b.dataset.act);
+  });
+}
+
+function pendingAction(i, act){
+  const it = pendingList[i];
+  if(!it) return;
+  const title = $('modal-title'), body = $('modal-body'), err = $('modal-error');
+  const ok = $('modal-ok'), cancel = $('modal-cancel');
+  const isReject = act === 'reject';
+  title.textContent = isReject ? '拒收交易' : '确认收款';
+  err.textContent = '';
+  body.innerHTML = `
+    <p class="muted" style="margin-bottom:12px;">${esc(it.sender)} → 我 · ${esc(it.tx_type)} · <b>${it.amount} A€</b>（${fmtTs(it.timestamp)}）</p>
+    ${isReject ? `<div class="field"><label>拒收原因（可选）</label><input id="f-reason" placeholder="说明拒收原因"></div>` : ''}
+    <div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
+  ok.textContent = isReject ? '确认拒收' : '确认接收';
+  ok.classList.remove('hidden');
+  ok.onclick = async () => {
+    const pass = $('f-pass').value;
+    if(pass.length < 8){ err.textContent = '口令至少 8 位'; return; }
+    const payload = { tx_id: it.tx_id, password: pass };
+    if(isReject) payload.reason = ($('f-reason').value || '').trim();
+    const r = await api(isReject ? '/api/reject' : '/api/confirm', payload);
+    if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent = r.message;
+  };
+  cancel.onclick = closeModal;
+}
 
 // ---------- 顶部按钮 ----------
 $('btn-sync').onclick = async () => { const r = await api('/api/sync', null, 'POST'); toast(r.message||'同步完成', !r.ok); await refresh(); };

@@ -68,7 +68,9 @@ pub fn build(wallet: Wallet) -> (Router, SharedState) {
         .route("/api/logout", post(logout))
         .route("/api/sync", post(sync_ep))
         .route("/api/transfer", post(transfer))
+        .route("/api/pending", get(pending_ep))
         .route("/api/confirm", post(confirm))
+        .route("/api/reject", post(reject))
         .route("/api/submit", post(submit))
         .route("/api/set-server", post(set_server))
         .route("/api/delete-account", post(delete_account))
@@ -144,6 +146,21 @@ struct RegisterReq {
 #[derive(Deserialize)]
 struct PassReq {
     password: String,
+}
+
+#[derive(Deserialize)]
+struct ConfirmReq {
+    #[serde(default)]
+    tx_id: Option<String>, // 可空：默认处理第一笔待确认
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct RejectReq {
+    tx_id: String,
+    password: String,
+    #[serde(default)]
+    reason: String, // 拒收原因（可空）
 }
 
 #[derive(Deserialize)]
@@ -346,21 +363,55 @@ async fn transfer(
 
 async fn confirm(
     State(st): State<SharedState>,
-    Json(req): Json<PassReq>,
+    Json(req): Json<ConfirmReq>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut w = lock(&st);
     ensure_server(&mut w);
-    let tid = client_api::list_pending(&w)
-        .ok()
-        .and_then(|l| l.into_iter().next().map(|p| p.tx_id));
-    let tid = match tid {
-        Some(t) => t,
-        None => return Ok(Json(json!({ "ok": true, "message": "当前没有待确认交易" }))),
+    let tid = match req.tx_id {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => match client_api::list_pending(&w).ok().and_then(|l| l.into_iter().next().map(|p| p.tx_id)) {
+            Some(t) => t,
+            None => return Ok(Json(json!({ "ok": true, "message": "当前没有待确认交易" }))),
+        },
     };
     match client_api::confirm_tx(&w, &tid, &req.password, None) {
         Ok(r) => {
             let s = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
             Ok(Json(json!({ "ok": true, "message": format!("交易 {:.8}… 状态 → {s}", tid) })))
+        }
+        Err(e) => Err(err(&e.to_string())),
+    }
+}
+
+/// 待确认交易列表（作为接收方），供前端"确认收款/拒收"弹窗展示。
+async fn pending_ep(
+    State(st): State<SharedState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut w = lock(&st);
+    ensure_server(&mut w);
+    match client_api::list_pending(&w) {
+        Ok(list) => Ok(Json(json!({
+            "items": list.into_iter().map(|p| json!({
+                "tx_id": p.tx_id, "tx_type": p.tx_type, "sender": p.sender,
+                "amount": p.amount, "timestamp": p.timestamp,
+            })).collect::<Vec<_>>(),
+        }))),
+        Err(e) => Err(err(&format!("获取待确认列表失败：{e}"))),
+    }
+}
+
+/// 拒收交易（作为接收方）：签名后提交中心，附拒收原因。
+async fn reject(
+    State(st): State<SharedState>,
+    Json(req): Json<RejectReq>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut w = lock(&st);
+    ensure_server(&mut w);
+    let reason = req.reason.trim();
+    match client_api::confirm_tx(&w, &req.tx_id, &req.password, if reason.is_empty() { None } else { Some(reason) }) {
+        Ok(r) => {
+            let s = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            Ok(Json(json!({ "ok": true, "message": format!("交易 {:.8}… 状态 → {s}", req.tx_id) })))
         }
         Err(e) => Err(err(&e.to_string())),
     }
