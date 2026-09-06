@@ -16,17 +16,18 @@
 - **协议与隐私同意**：登录 / 注册须先勾选同意《使用协议》与《隐私政策》（个人与企业使用协议不同）；未勾选前端直接拦截、不发请求，服务端亦校验并记录同意标识与上次登录时间。
 - **多账户登录**：登录界面不展示本地历史记录，直接输入 UID+密码即可；本地有加密私钥缓存则直接解锁，否则自动向中心取回（跨设备恢复）。
 - **密钥体系**：GnuPG（`gpg.exe`，ed25519）签发身份；账户公钥上链，私钥始终由你的口令加密——加密副本存中心可跨设备恢复，口令不落盘、不传明文。
-- **自动更新**：客户端启动自动检查更新（GitHub Releases 优先，不可达 / 下载慢自动切中心服务器下载）；服务器端以清单白名单 + sha256 + IP 限速防恶意下载。
+- **自动更新**：客户端启动自动检查更新；**以中心为版本权威**——先向中心获取最新版本号，仅当 GitHub Release 恰为该最新版才走 GitHub，否则直连中心下载；服务端安装器内置同版本客户端安装包（`client-package/`），开箱即可下发；服务器以清单白名单 + sha256 + IP 限速防恶意下载。
+- **余额自动重算**：每次读取 / 同步余额前，中心按已确认交易重算各账户余额（Mint/Issue 增发、Redeem 回收、Transfer 双向；Rejected / Error 不计），自动纠正历史结算差异。
 - **自动同步 + 手动刷新**：登录后立即自动同步账本，之后每 3 分钟一次；顶栏与各页提供手动「刷新」按钮。
 - **账单视图**：流水图（累计余额走势）与月度 · 总账（按月份折叠，无交易月份不显示，月内按日期再折叠），展示收 / 支 / 净额。
 - **详细运行日志**：每次启动新建 `{启动时间}.alphalog`，统一「时间 - [类型] 内容」，记录全操作 / 调用 / 通讯 / 输出 / 错误 / 输入；口令、密钥、用户目录名自动打码。
 - **成员国家/企业认定**：管理员在后台认定 AEU 成员，客户端注册 Country / Company 只能从已认定列表选择（服务端二次校验）。
 - **注销账户（双重）**：中心将状态改为 `Deleted`（账户与账本只读保留供审计、不可再登录）+ 本地删除记录与密钥。
 - **双端口隔离**：公开 API（client）与网页管理后台分开监听，后台默认仅本机可达。
+- **系统账本账户**：客户端不再登录 System 账户（服务端拦截）；系统账户（AESystem / AlphaEU / PreIssuedAccount 等）改由后台「系统账本账户登录」进入 `/sys`——界面与功能同客户端（余额 / 转账 / 待收箱 / 流水），由服务端持系统密钥构建并签名。
 - **一键安装**：安装包内嵌 `gpg4win-5.1.0.exe`，装完自动启动 GnuPG 安装向导（默认 Program Files\GnuPG）。
 - **HTTPS 就绪**：经内网穿透（如 frp）暴露公网，由穿透服务商 AutoTLS 提供证书；客户端走系统信任链校验。
 - **安全加固**：请求体限 4MB、超时 30s、隐藏 Server 头、安全响应头（CSP / X-Frame-Options / nosniff / no-store）、请求级日志、管理操作审计留痕、源码无硬编码密钥。
-- **修复工具**：`acs-server repair <db> [--apply]` 以独立 EXE 清理拒收 / 错误 / 异常金额等脏数据（服务器无需 sqlite3 / python 环境）。
 
 ---
 
@@ -42,13 +43,14 @@
                                              ▲
                                      (ed25519 签名校验 · 同步免 apikey)
 内网管理员 (浏览器) ──────────────────────►  acs-server 管理后台 :9680 (127.0.0.1)
-                                             /login /root /finance + /api/admin/*
+                                             /login /root /finance /sys + /api/admin/*
+                                             （含系统账本 /api/admin/sys/*）
 ```
 
 | 服务 | 默认端口 | 绑定 | 暴露内容 |
 |---|---|---|---|
 | **公开 API** | **9600** | `0.0.0.0` | 仅 client：`/api/client/*`、`/api/sync`、`/api/legal/{doc}`、`/api/client/update/*`、`/api/status`（同步免 apikey，无网页、无管理） |
-| **后台管理** | **9680** | `127.0.0.1`（仅本机） | 网页后台 + 管理 API `/api/admin/*`、`/api/accounts`、`/api/stats`、`/api/audit`、`/api/members` |
+| **后台管理** | **9680** | `127.0.0.1`（仅本机） | 网页后台 + 管理 API `/api/admin/*`、`/api/accounts`、`/api/stats`、`/api/audit`、`/api/members`、系统账本 `/sys` + `/api/admin/sys/*` |
 
 > 对外只暴露 **9600**（经内网穿透）；9680 管理端**不开放公网**，管理员在本机访问，或经 SSH/RDP 隧道访问。
 
@@ -119,24 +121,23 @@ acs-client new --uid Steve --email Steve@aeu.org --pass 'xxx' --server http://12
 acs-client status / sync / open / send / confirm / config
 ```
 
-### 4. 管理后台（成员认定 / 审计）
+### 4. 管理后台（成员认定 / 审计 / 系统账本）
 
 根管理员（9680）登录后（支持明/暗主题切换）：
+- **系统账本**（顶栏入口 `/sys`）：选择系统账户进入账本 → 余额 / 转账 / 待收箱（确认·拒收）/ 流水 / 退出账本
 - **账户** → 查询/冻结账户、管理后台管理员、**AEU 成员国家 / 企业认定**（双列面板，添加/撤销/删除）
 - **安全** → 铸造（发行）、根密钥解锁/导出
 - **审计** → 管理日志、交易总账单（密码解锁）
 
-金融部（finance）登录后：状态 / 企业账户（银行） / **成员企业认定** / 审计。
+金融部（finance）登录后：状态 / 企业账户（银行） / **成员企业认定** / 审计 / 系统账本。
 
-### 5. 修复工具与更新清单
+### 5. 更新清单与数据修复
 
-**修复工具**（独立 EXE，服务器无需 sqlite3 / python）：
-```powershell
-acs-server repair <数据库路径>          # 预览：列出拒收/错误/异常金额等脏数据
-acs-server repair <数据库路径> --apply  # 执行：事务内删除脏数据并写入 .alphalog
-```
+**客户端更新清单**：
+- 服务端安装器**内置同版本客户端安装包**（`{安装目录}\client-package\update.json` + `acs-client-{版本}-windows-x64-setup.exe`），版本互相对应；服务端更新源优先读取此随包目录，运维也可放 `~/.alpha_dir/acs-server/updates/` 覆盖（格式参考仓库根 `acs-server/updates.example.json`）。
+- 客户端启动自动检查更新：以中心为版本权威获取最新版本号，仅当 GitHub Release 恰为该最新版才走 GitHub，否则直连中心下载。
 
-**客户端更新清单**：服务器在 `~/.alpha_dir/acs-server/updates/` 放置 `update.json` + 对应 `acs-client-{版本}-windows-x64-setup.exe`（格式参考仓库根 `acs-server/updates.example.json`）；客户端启动自动检查（GitHub 优先，不可达/慢则走服务器下载）。
+**数据修复**：Rejected / Error / 异常金额等历史脏数据，由技术侧离线处理（读取数据库 → 清理异常交易 → 触发余额重算），无需在服务器安装 sqlite3 / python。
 
 ### 6. 运行测试
 
@@ -240,7 +241,7 @@ certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
 ACSystem/
 ├── Cargo.toml              # workspace（acs-core / acs-server / acs-client）
 ├── acs-core/               # 核心库（rlib + cdylib）：模型/SQLite/账户/交易/GPG/协议/日志
-├── acs-server/             # 中心服务器（axum 双端口 + 网页管理后台 + 更新清单/修复工具）
+├── acs-server/             # 中心服务器（axum 双端口 + 网页管理后台 + 系统账本 /sys + 更新清单）
 ├── acs-client/             # Tauri 2 桌面钱包（多级菜单 + 主题）/ CLI；前端资源内嵌于 exe
 ├── deploy/
 │   └── certs/generate.ps1  # 本地证书生成（TCP 透传端到端加密时用）
