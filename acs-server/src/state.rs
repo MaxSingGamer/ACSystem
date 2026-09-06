@@ -18,6 +18,8 @@ pub struct AppState {
     pub central: Arc<Mutex<CentralState>>,
     /// 审计/账单二次鉴权：bearer token -> 过期时间戳。
     pub audit_unlocked: Arc<Mutex<HashMap<String, i64>>>,
+    /// 「系统账本账户登录」：管理员 token -> 其正在代管的系统账户 uid。
+    pub sys_acting: Arc<Mutex<HashMap<String, String>>>,
     pub gpg: GpgUtil,
     pub token_ttl_secs: i64,
     /// 服务器数据目录（~/.alpha_dir/acs-server），内置 updates/ 供客户端下载。
@@ -49,6 +51,7 @@ impl AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             central: Arc::new(Mutex::new(CentralState::default())),
             audit_unlocked: Arc::new(Mutex::new(HashMap::new())),
+            sys_acting: Arc::new(Mutex::new(HashMap::new())),
             gpg,
             token_ttl_secs: 600, // 10 分钟待机
             data_dir,

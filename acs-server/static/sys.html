@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alpha Coin · 系统账本</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<style>
+  .brand-mark{background:linear-gradient(135deg,#4f6cff,#1bc9ff);color:#fff;width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;letter-spacing:-.5px}
+  .sys-pick{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}
+  .sys-card{border:1px solid var(--line);background:var(--card);border-radius:18px;padding:18px;cursor:pointer;box-shadow:var(--shadow);transition:border-color .15s,transform .12s}
+  .sys-card:hover{border-color:var(--blue);transform:translateY(-2px)}
+  .sys-card .nm{font-size:16px;font-weight:700}
+  .wallet-wrap{display:flex;gap:0;min-height:calc(100vh - 58px)}
+  .wnav{width:160px;border-right:1px solid var(--line);padding:14px 8px;flex:none}
+  .wnav .it{padding:10px 12px;border-radius:10px;cursor:pointer;color:var(--mut);font-size:13.5px;margin-bottom:2px}
+  .wnav .it:hover{background:var(--panel2);color:var(--text)}
+  .wnav .it.on{background:var(--blue);color:#fff;font-weight:600}
+  .wmain{flex:1;padding:20px 24px;min-width:0}
+  .hero{background:linear-gradient(135deg,var(--blue),#1bc9ff);color:#fff;border-radius:18px;padding:24px;margin-bottom:16px}
+  .hero .k{font-size:12.5px;opacity:.9}
+  .hero .v{font-size:32px;font-weight:800;margin-top:6px}
+  .hero .s{font-size:12.5px;margin-top:8px;opacity:.92}
+  .rowline{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  .rowline input,.rowline select{width:auto}
+  .subhead{font-size:13px;color:var(--mut);margin-bottom:12px}
+</style>
+</head>
+<body>
+<header>
+  <div class="topbar">
+    <div class="brand"><span class="brand-mark">A€</span>Alpha Coin <span class="muted" style="font-weight:400">· 系统账本账户登录</span></div>
+    <span class="sp"></span>
+    <span class="who" id="who"></span>
+    <button class="link-btn" onclick="toggleTheme()">🌓</button>
+    <button class="link-btn" onclick="goBack()">返回后台</button>
+    <button class="link-btn" onclick="logout()">退出</button>
+  </div>
+</header>
+
+<div class="layout" id="pickView">
+  <div class="panel">
+    <h2>选择要登录的系统账本账户</h2>
+    <p class="muted" style="margin-bottom:16px">系统账本账户（AESystem / AlphaEU / PreIssuedAccount 等）仅通过此处后台登录；登录后界面与功能同 Alpha Wallet 客户端一致。</p>
+    <div class="sys-pick" id="sysList"></div>
+  </div>
+</div>
+
+<div class="wallet-wrap" id="walletView" style="display:none">
+  <div class="wnav" id="wnav"></div>
+  <div class="wmain" id="wmain"></div>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script src="/static/js/sys.js"></script>
+</body>
+</html>

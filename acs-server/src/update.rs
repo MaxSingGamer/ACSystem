@@ -76,14 +76,34 @@ struct ManifestAsset {
     notes: String,
 }
 
-fn manifest_path(st: &AppState) -> std::path::PathBuf {
-    st.data_dir.join("updates").join(MANIFEST_FILE)
+/// 服务端可用的“客户端安装包目录”解析顺序：
+/// 1) 用户覆盖目录 `~/.alpha_dir/acs-server/updates/`（有 update.json 时优先，便于运维投放新包）
+/// 2) 随服务端安装包内置的 `client-package/`（安装器已把同版本客户端安装包释放于此，开箱即用）
+fn bundled_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("client-package")))
+        .filter(|p| p.join(MANIFEST_FILE).exists())
+}
+
+fn pkg_dir(st: &AppState) -> std::path::PathBuf {
+    let user = st.data_dir.join("updates");
+    if user.join(MANIFEST_FILE).exists() {
+        return user;
+    }
+    if let Some(b) = bundled_dir() {
+        return b;
+    }
+    user // 无配置时回到默认用户目录（便于给出清晰报错）
 }
 
 fn load_manifest(st: &AppState) -> Result<Manifest, ApiErr> {
-    let p = manifest_path(st);
-    let raw = std::fs::read_to_string(&p)
-        .map_err(|_| ApiErr::internal("服务器未配置更新清单（updates/update.json 不存在）"))?;
+    let p = pkg_dir(st).join(MANIFEST_FILE);
+    let raw = std::fs::read_to_string(&p).map_err(|_| {
+        ApiErr::internal(
+            "服务器未配置更新清单（updates/update.json 或随包 client-package/update.json 不存在）",
+        )
+    })?;
     serde_json::from_str(&raw).map_err(|e| ApiErr::internal(format!("更新清单解析失败：{e}")))
 }
 
@@ -137,7 +157,7 @@ async fn update_info(
     }
     let current = if req.current.is_empty() { m.version.clone() } else { req.current.clone() };
     let available = version_gt(&m.version, &current);
-    let size = std::fs::metadata(st.data_dir.join("updates").join(&asset.file))
+    let size = std::fs::metadata(pkg_dir(&st).join(&asset.file))
         .map(|md| md.len())
         .unwrap_or(0);
     let file = asset.file.clone();
@@ -194,8 +214,8 @@ async fn download(
             .into_response();
     }
 
-    // 路径安全：仅允许 updates 目录内文件
-    let updates = st.data_dir.join("updates");
+    // 路径安全：仅允许安装包目录（用户 updates/ 或随包 client-package/）内文件
+    let updates = pkg_dir(&st);
     let path = updates.join(&asset.file);
     let canon_updates = updates.canonicalize().unwrap_or(updates);
     let canon_path = match path.canonicalize() {

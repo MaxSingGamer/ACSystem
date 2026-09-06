@@ -136,62 +136,56 @@ fn urlencode(s: &str) -> String {
 /// 检查更新。返回统一结构：
 /// { update_available, latest, current, notes, platform, source: "github"|"server",
 ///   download_url, github_url, server_url, file, size, sha256 }
+///
+/// 版本权威：**默认服务端始终保持最新**。客户端先向中心获取最新版本号，
+/// 再判断 GitHub Releases 是否恰好等于该最新版：是则走 GitHub（官方镜像，速度快），
+/// 否则（GitHub 不是最新 / 不可达 / 无匹配安装包）直接向中心服务器请求安装包。
 pub fn check(w: &Wallet) -> Result<Value> {
     let current = acs_core::VERSION.to_string();
     let plat = platform();
-    let server_url = format!("{}/api/client/update/info?current={}&platform={plat}", server_base(w), current);
 
-    // 1) GitHub 优先
-    if let Some((latest, dl_url, _elapsed)) = github_latest(&plat) {
-        let available = version_gt(&latest, &current);
-        return Ok(json!({
-            "ok": true,
-            "update_available": available,
-            "latest": latest,
-            "current": current,
-            "notes": "",
-            "platform": plat,
-            "source": "github",
-            "download_url": dl_url,
-            "github_url": dl_url,
-            "server_url": server_url,
-            "file": "",
-            "size": 0,
-            "sha256": "",
-        }));
-    }
-
-    // 2) GitHub 不可达/无匹配 → 服务器源
+    // 1) 以中心为权威，获取最新版本号与下载信息
     let j = server_info(w, &current, &plat)?;
     let latest = j.get("latest").and_then(|v| v.as_str()).unwrap_or(&current).to_string();
-    let available = j.get("update_available").and_then(|v| v.as_bool()).unwrap_or(false);
-    let server_dl = j
-        .get("server_download_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let github_dl = j
-        .get("github_download_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let dl = if server_dl.starts_with("http") {
-        server_dl.to_string()
+    let available = version_gt(&latest, &current);
+    let notes = j.get("notes").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let file = j.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let sha256 = j.get("sha256").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let size = j.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let github_dl = j.get("github_download_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let server_rel = j.get("server_download_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let server_full = if server_rel.starts_with("http") {
+        server_rel.clone()
     } else {
-        format!("{}{}", server_base(w), server_dl)
+        format!("{}{}", server_base(w), server_rel)
     };
+    let server_url = format!("{}/api/client/update/info?current={}&platform={plat}", server_base(w), current);
+
+    // 2) 判断 GitHub Release 是否为最新（相等才算最新）
+    let gh = github_latest(&plat); // Option<(version, download_url, elapsed_ms)>
+    let github_is_latest = gh.as_ref().map(|(v, _, _)| v == &latest).unwrap_or(false);
+    let gh_url = gh.as_ref().map(|(_, u, _)| u.clone()).unwrap_or_else(|| github_dl.clone());
+
+    let source = if github_is_latest { "github" } else { "server" };
+    let dl = if github_is_latest { gh_url.clone() } else { server_full.clone() };
+    acs_core::log::net(&format!(
+        "update 版本权威=中心(latest={latest}, available={available}), GitHub是否最新={github_is_latest} → 下载源={source}"
+    ));
+
     Ok(json!({
         "ok": true,
         "update_available": available,
         "latest": latest,
         "current": current,
-        "notes": j.get("notes").and_then(|v| v.as_str()).unwrap_or(""),
+        "notes": notes,
         "platform": plat,
-        "source": "server",
+        "source": source,
         "download_url": dl,
-        "github_url": github_dl,
+        "github_url": gh_url,
         "server_url": server_url,
-        "file": j.get("file").and_then(|v| v.as_str()).unwrap_or(""),
-        "size": j.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
-        "sha256": j.get("sha256").and_then(|v| v.as_str()).unwrap_or(""),
+        "file": file,
+        "size": size,
+        "sha256": sha256,
     }))
 }
 

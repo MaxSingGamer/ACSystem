@@ -15,6 +15,7 @@ pub fn routes() -> Router<AppState> {
         .route("/login", get(login_page))
         .route("/root", get(root_page))
         .route("/finance", get(finance_page))
+        .route("/sys", get(sys_page))
         .nest_service("/static", ServeDir::new(dir))
 }
 
@@ -51,6 +52,11 @@ async fn root_page() -> Html<String> {
 /// 金融部页面壳。
 async fn finance_page() -> Html<String> {
     Html(read_html("finance.html"))
+}
+
+/// 系统账本账户登录 / 操作页（替代客户端登录 System 账户；功能与客户端钱包一致）。
+async fn sys_page() -> Html<String> {
+    Html(read_html("sys.html"))
 }
 
 fn read_html(name: &str) -> String {

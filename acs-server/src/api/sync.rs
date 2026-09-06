@@ -45,6 +45,8 @@ async fn sync_public(
 ) -> ApiResult<Json<serde_json::Value>> {
     let since = q.since.unwrap_or(0);
     let conn = st.db.lock().unwrap();
+    // 每次读取（同步拉余额/账本）前自动重算余额，纠正历史结算差异
+    acs_core::account::recompute_all_balances(&conn)?;
     let (snapshot, hash) = build_snapshot(&conn, since)?;
     let central_sig = crate::api::keys::try_sign_hash(&st, &hash);
     Ok(Json(json!({ "ok": true, "hash": hash, "central_sig": central_sig, "data": snapshot })))

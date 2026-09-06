@@ -112,6 +112,7 @@ pub fn admin_routes() -> Router<AppState> {
         .route("/api/admin/logout", post(crate::auth::logout))
         .route("/api/admin/me", get(crate::auth::me))
         .route("/api/admin/change-password", post(crate::auth::change_password))
+        .merge(crate::sysw::routes())
         .merge(accounts::routes())
         .merge(stats::routes())
         .merge(admins::routes())

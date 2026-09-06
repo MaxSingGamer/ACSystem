@@ -136,6 +136,10 @@ async fn open_account(
 ) -> ApiResult<Json<serde_json::Value>> {
     let atype = AccountType::from_str(&req.atype)
         .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+    // 系统账本账户：不接受客户端自助开立（改由 Server 管理后台「系统账本账户登录」）
+    if atype == AccountType::System {
+        return Err(ApiErr::forbidden("系统账本账户不接受客户端自助开立，请通过管理后台操作"));
+    }
     if req.uid.trim().is_empty() || req.email.trim().is_empty() || req.pubkey.trim().is_empty() {
         return Err(ApiErr::bad_request("uid/email/pubkey 均不能为空"));
     }
@@ -276,6 +280,12 @@ async fn fetch_key(
         if acc.status != AccountStatus::Active {
             return Err(ApiErr::forbidden("该账户已注销/冻结，无法登录"));
         }
+        // 系统账本账户：客户端不再支持登录（改由管理后台操作）
+        if atype == AccountType::System {
+            return Err(ApiErr::forbidden(
+                "系统账本账户请通过 Server 管理后台「系统账本账户登录」操作，客户端已取消系统账户登录",
+            ));
+        }
         // 更新上次登录时间
         let _ = conn.execute(
             "UPDATE account_credentials SET last_login=?1 WHERE uid=?2 AND type=?3",
@@ -338,8 +348,9 @@ async fn submit(
         let _ = sender_atype;
     }
 
-    // 5) 提交（Pending + tx_confirmations）
+    // 5) 提交（Pending + tx_confirmations）；提交前先重算余额，保证“发送方余额足够”判断准确
     let mut conn = st.db.lock().unwrap();
+    acs_core::account::recompute_all_balances(&conn)?;
     transaction::submit_tx(&mut conn, &tx)?;
     Ok(Json(json!({ "ok": true, "tx_id": tx.tx_id, "status": "Pending" })))
 }

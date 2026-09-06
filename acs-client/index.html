@@ -282,7 +282,7 @@ function renderAuth(){
   body.innerHTML=`<label>账户类型</label>
     <select id="auth-type" onchange="authTypeChange()">
       <option value="Individual">个人账户</option><option value="Company">企业账户（银行）</option>
-      <option value="Country">国家账户</option><option value="System">系统账户</option></select>
+      <option value="Country">国家账户</option></select>
     <div id="auth-uid-wrap"></div>
     <label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">
     <div class="agree" id="auth-agree-wrap"></div>
@@ -306,7 +306,7 @@ function authTypeChange(){
   if(t==='Individual'){ wrap.innerHTML=`<label>账户 UID</label><input id="auth-uid" placeholder="如 Steve">`; }
   else if(t==='Company'){ const o=(memberLists.companies||[]).map(c=>`<option>${esc(c)}</option>`).join(''); wrap.innerHTML=`<label>企业名称（仅 AEU 已认定）</label><select id="auth-uid">${o||'<option value="">（暂无已认定企业）</option>'}</select>`; }
   else if(t==='Country'){ const o=(memberLists.countries||[]).map(c=>`<option>${esc(c)}</option>`).join(''); wrap.innerHTML=`<label>国家名称（仅 AEU 已认定）</label><select id="auth-uid">${o||'<option value="">（暂无已认定国家）</option>'}</select>`; }
-  else { const o=(memberLists.systems||[]).map(c=>`<option>${esc(c)}</option>`).join(''); wrap.innerHTML=`<label>系统账户</label><select id="auth-uid">${o||'<option value="">（暂无）</option>'}</select>`; }
+  else { wrap.innerHTML=`<label>账户 UID</label><input id="auth-uid" placeholder="如 Steve">`; }
   authAgreeRender();
 }
 function bindDocLinks(root){ root.querySelectorAll('a[data-doc]').forEach(a=>{ a.onclick=(e)=>{ e.preventDefault(); openDoc(a.dataset.doc,a.dataset.title); }; }); }

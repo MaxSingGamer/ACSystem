@@ -99,3 +99,49 @@ pub fn update_balance_and_hash(
     conn.execute(&sql, params![balance, last_tx_hash, Utc::now().timestamp(), uid])?;
     Ok(())
 }
+
+/// 全量重算并回写所有账户余额：balance = Σ(已确认收款) − Σ(已确认支出)。
+/// 只统计状态为 Confirmed 的交易（Pending/Rejected/Error 一律不计），
+/// 从而自动纠正历史结算异常。在“读取余额”类请求前调用即可。
+pub fn recompute_all_balances(conn: &Connection) -> Result<()> {
+    for at in [
+        AccountType::Country,
+        AccountType::Company,
+        AccountType::Individual,
+        AccountType::System,
+    ] {
+        let table = at.table_name();
+        let st = at.as_str();
+        let mut stmt = conn.prepare(&format!("SELECT uid FROM {table}"))?;
+        let uids: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        for uid in uids {
+            let inc: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(amount),0) FROM transactions \
+                     WHERE receiver=?1 AND receiver_type=?2 AND status='Confirmed' \
+                       AND tx_type IN ('Mint','Issue','Transfer')",
+                    params![uid, st],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let out: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(amount),0) FROM transactions \
+                     WHERE sender=?1 AND sender_type=?2 AND status='Confirmed' \
+                       AND tx_type IN ('Redeem','Transfer')",
+                    params![uid, st],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let bal = (inc - out).max(0);
+            let _ = conn.execute(
+                &format!("UPDATE {table} SET balance=?1 WHERE uid=?2"),
+                params![bal, uid],
+            );
+        }
+    }
+    Ok(())
+}

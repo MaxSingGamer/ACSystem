@@ -7,8 +7,8 @@ mod api;
 mod auth;
 mod crypto;
 mod legal;
-mod repair;
 mod state;
+mod sysw;
 mod update;
 mod web;
 
@@ -31,12 +31,6 @@ use tower_http::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // CLI 子命令：repair（修复工具，Rust EXE 提供，服务器无需 sqlite3/python）
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() >= 2 && args[1] == "repair" {
-        return run_repair_cli(&args[2..]);
-    }
-
     let data_dir = std::env::var("ACS_DATA_DIR").unwrap_or_else(|_| {
         // 服务器数据统一分类存放：~/.alpha_dir/acs-server
         acs_core::config::CoreConfig::default_alpha_dir()
@@ -152,19 +146,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// CLI 修复子命令：`acs-server repair <db> [--apply]`。
-fn run_repair_cli(args: &[String]) -> anyhow::Result<()> {
-    if args.is_empty() {
-        println!("用法：acs-server repair <数据库路径> [--apply]");
-        println!("  （不带 --apply 为预览；带 --apply 执行删除）");
-        return Ok(());
-    }
-    let db_path = args[0].clone();
-    let apply = args.iter().any(|a| a == "--apply");
-    repair::run(&db_path, !apply)
-}
-
-// ---------- 账户种子（v2.1.0 密码策略） ----------
+/// 账户种子（v2.1.0 密码策略）
 
 /// .env 定义的管理员账户种子。
 struct AdminSeed {
