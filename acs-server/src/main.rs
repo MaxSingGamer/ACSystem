@@ -6,17 +6,21 @@
 mod api;
 mod auth;
 mod crypto;
+mod legal;
+mod repair;
 mod state;
+mod update;
 mod web;
 
 use acs_core::account;
 use acs_core::config::CoreConfig;
 use acs_core::db;
 use acs_core::gpg::GpgUtil;
+use acs_core::log;
 use acs_core::models::{Account, AccountStatus, AccountType};
 use axum::http::header;
 use axum::Router;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use state::AppState;
 use tower_http::{
@@ -27,6 +31,12 @@ use tower_http::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // CLI 子命令：repair（修复工具，Rust EXE 提供，服务器无需 sqlite3/python）
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && args[1] == "repair" {
+        return run_repair_cli(&args[2..]);
+    }
+
     let data_dir = std::env::var("ACS_DATA_DIR").unwrap_or_else(|_| {
         // 服务器数据统一分类存放：~/.alpha_dir/acs-server
         acs_core::config::CoreConfig::default_alpha_dir()
@@ -34,8 +44,11 @@ async fn main() -> anyhow::Result<()> {
             .to_string_lossy()
             .into_owned()
     });
-    let cfg = CoreConfig::server_default(data_dir);
+    let cfg = CoreConfig::server_default(data_dir.clone());
     cfg.ensure_dirs()?;
+    // 初始化 .alphalog（启动日志，data_dir 下）
+    let _ = log::init(&cfg.data_dir);
+    log::info(format!("acs-server 启动 v{} 数据目录: {}", acs_core::VERSION, cfg.data_dir.display()));
     println!("[acs-server] 数据目录: {}", cfg.data_dir.display());
 
     let (gpg_bin, gpg_src) = acs_core::gpg_detect::ensure_gpg()?;
@@ -48,7 +61,10 @@ async fn main() -> anyhow::Result<()> {
     db::migrate_center(&conn)?;
     seed_from_config(&conn, &gpg, &cfg)?;
 
-    let state = AppState::new(conn, gpg);
+    // 客户端更新包目录（updates/update.json + 安装包）
+    let updates_dir = cfg.data_dir.join("updates");
+    std::fs::create_dir_all(&updates_dir)?;
+    let state = AppState::new(conn, gpg, cfg.data_dir.clone());
     // 网络安全加固（两服务共用）：
     // - 请求体大小限制 4MB（防超大 payload；pubkey/sig 均远小于此）
     // - 请求超时 30s（防慢速攻击）
@@ -88,9 +104,10 @@ async fn main() -> anyhow::Result<()> {
                 "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
             ),
         ))
+        .layer(axum::middleware::from_fn(crate::api::log_request))
         .with_state(state.clone());
 
-    // 公开服务：仅 client / mirror 所需端点（apikey 认证），无后台管理
+    // 公开服务：仅 client 所需端点（无后台管理）
     let public_app: Router = Router::new()
         .merge(api::public_routes())
         .layer(RequestBodyLimitLayer::new(4 * 1024 * 1024))
@@ -110,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
             header::X_FRAME_OPTIONS,
             axum::http::HeaderValue::from_static("DENY"),
         ))
+        .layer(axum::middleware::from_fn(crate::api::log_request))
         .with_state(state);
 
     let public_bind = std::env::var("ACS_PUBLIC_BIND").unwrap_or_else(|_| "0.0.0.0".into());
@@ -123,15 +141,27 @@ async fn main() -> anyhow::Result<()> {
     let admin_listener =
         tokio::net::TcpListener::bind(format!("{admin_bind}:{admin_port}")).await?;
 
-    println!("[acs-server] 公开 API（client/mirror）: http://{public_bind}:{public_port}");
+    println!("[acs-server] 公开 API（client）: http://{public_bind}:{public_port}");
     println!("[acs-server] 后台管理（仅内网）: http://{admin_bind}:{admin_port}");
-    println!("[acs-server] 账户种子：见 ~/.alpha_dir/.env（无配置时默认 admin，初始密码见 SYSTEM_LOGIN_PASSWORDS.txt）");
+    println!("[acs-server] 账户种子：见 {}/.env（无配置时默认 admin，初始密码见 SYSTEM_LOGIN_PASSWORDS.txt）", cfg.data_dir.display());
 
     let pub_handle = tokio::spawn(async move { axum::serve(public_listener, public_app).await });
     let adm_handle = tokio::spawn(async move { axum::serve(admin_listener, admin_app).await });
     pub_handle.await.map_err(|e| anyhow::anyhow!("公开服务异常：{e}"))??;
     adm_handle.await.map_err(|e| anyhow::anyhow!("管理服务异常：{e}"))??;
     Ok(())
+}
+
+/// CLI 修复子命令：`acs-server repair <db> [--apply]`。
+fn run_repair_cli(args: &[String]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        println!("用法：acs-server repair <数据库路径> [--apply]");
+        println!("  （不带 --apply 为预览；带 --apply 执行删除）");
+        return Ok(());
+    }
+    let db_path = args[0].clone();
+    let apply = args.iter().any(|a| a == "--apply");
+    repair::run(&db_path, !apply)
 }
 
 // ---------- 账户种子（v2.1.0 密码策略） ----------
@@ -149,20 +179,20 @@ struct SystemSeed {
     pwd: String,
 }
 
-/// 账户配置（来自 ~/.alpha_dir/.env）。
+/// 账户配置（来自各端数据目录 .env，如服务端 ~/.alpha_dir/acs-server/.env）。
 struct EnvConfig {
     admins: Vec<AdminSeed>,
     systems: Vec<SystemSeed>,
 }
 
-/// .env 文件路径：~/.alpha_dir/.env。
-fn alpha_dir_env_path() -> PathBuf {
-    CoreConfig::default_alpha_dir().join(".env")
+/// .env 文件路径：各端独立目录（服务端 ~/.alpha_dir/acs-server/.env）。
+fn data_dir_env_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(".env")
 }
 
-/// 读取 ~/.alpha_dir/.env 中的账户定义。无文件或无定义返回 None。
-fn load_env_config() -> Option<EnvConfig> {
-    let content = std::fs::read_to_string(alpha_dir_env_path()).ok()?;
+/// 读取各端数据目录下的 .env（服务端 ~/.alpha_dir/acs-server/.env）中的账户定义。无文件或无定义返回 None。
+fn load_env_config(data_dir: &Path) -> Option<EnvConfig> {
+    let content = std::fs::read_to_string(data_dir_env_path(data_dir)).ok()?;
     let mut admins = Vec::new();
     let mut systems = Vec::new();
     for line in content.lines() {
@@ -215,7 +245,7 @@ fn seed_from_config(
     gpg: &GpgUtil,
     cfg: &CoreConfig,
 ) -> anyhow::Result<()> {
-    match load_env_config() {
+    match load_env_config(&cfg.data_dir) {
         None => seed_default_admin(conn, gpg, cfg)?,
         Some(conf) => {
             disable_default_admin(conn)?;

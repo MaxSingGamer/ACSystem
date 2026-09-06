@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-preset="cblue">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A€ 钱包</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#ffffff; --panel2:#eef0f4; --border:#e3e5ea;
+    --fg:#0b1f3a; --mut:#68707d; --acc:#0a4f9e; --acc2:#0a6cd6;
+    --ok:#0f8a4c; --warn:#b7791f; --err:#c53030;
+    --side:#0b1f3a; --side-fg:#cfe0ff; --side-mut:#8fa6c9;
+    --shadow:0 10px 30px rgba(15,35,80,.08);
+  }
+  [data-preset="emerald"]{--acc:#0f7d5a;--acc2:#16a06e;--side:#0c2f26;--side-fg:#c8efe0;--side-mut:#7fbba2}
+  [data-preset="wine"]{--acc:#8f1d3c;--acc2:#b02348;--side:#2a0c15;--side-fg:#f0c9d2;--side-mut:#c28e9b}
+  [data-preset="noir"]{--bg:#10131a;--panel:#171b24;--panel2:#1e2430;--border:#2a3242;--fg:#e6e9f0;--mut:#98a0ae;--side:#0b0e14;--side-fg:#d7e3ff;--side-mut:#7f8b9f;--acc:#6ea8ff;--acc2:#8ec0ff;--ok:#37c07a;--warn:#e0a63a;--err:#ff6b6b}
+  [data-preset="navy"]{--bg:#0d1524;--panel:#131c2e;--panel2:#1a2540;--border:#27344f;--fg:#e8edf5;--mut:#93a0b8;--side:#0a1120;--side-fg:#cfe0ff;--side-mut:#7f8fa8;--acc:#3d8bfd;--acc2:#6faeff;--ok:#2fb771;--warn:#d9a441;--err:#f0616d}
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{background:var(--bg); color:var(--fg); font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif; font-size:14px; -webkit-font-smoothing:antialiased;}
+  .hidden{display:none !important;}
+  button{font:inherit; cursor:pointer;}
+  a{color:var(--acc); text-decoration:underline; cursor:pointer;}
+  .muted{color:var(--mut);}
+  .mono{font-family:"SF Mono",Consolas,monospace;}
+
+  /* 按钮 */
+  .btn{background:var(--acc); color:#fff; border:none; border-radius:12px; padding:10px 18px; font-size:13.5px; font-weight:600; transition:all .15s;}
+  .btn:hover{filter:brightness(1.08);}
+  .btn.ghost{background:var(--panel2); color:var(--fg); border:1px solid var(--border); font-weight:500;}
+  .btn.ghost:hover{background:var(--panel);}
+  .btn.danger{background:#fbe9ec; color:var(--err);}
+  .btn.ok{background:#e7f5ec; color:var(--ok);}
+  .btn.sm{padding:6px 12px; font-size:12px; border-radius:10px;}
+  .btn:disabled{opacity:.55; cursor:not-allowed;}
+
+  /* 登录 */
+  #auth{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; background:linear-gradient(160deg,var(--side) 0%,var(--side) 45%,var(--bg) 100%);}
+  .auth-card{width:100%; max-width:400px; background:var(--panel); border:1px solid var(--border); border-radius:20px; padding:30px; box-shadow:var(--shadow);}
+  .auth-brand{display:flex; align-items:center; gap:12px; margin-bottom:8px;}
+  .auth-brand .mark{width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-weight:800;font-size:18px;display:flex;align-items:center;justify-content:center;letter-spacing:-.5px;}
+  .auth-brand .t{font-size:18px; font-weight:800;}
+  .auth-brand .s{font-size:12px; color:var(--mut);}
+  .auth-card label{display:block; color:var(--mut); font-size:12.5px; margin:14px 0 6px;}
+  .auth-card input,.auth-card select{width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:12px; padding:11px 14px; font-size:14px; outline:none;}
+  .auth-card input:focus,.auth-card select:focus{border-color:var(--acc); box-shadow:0 0 0 3px rgba(10,79,158,.15);}
+  .auth-card .err{color:var(--err); margin-top:10px; min-height:16px; font-size:13px;}
+  .auth-card .btns{display:flex; gap:10px; margin-top:16px;}
+  .auth-card .btns .btn{flex:1;}
+  .agree{background:var(--panel2); border:1px solid var(--border); border-radius:12px; padding:11px 13px; margin-top:14px;}
+  .agree label{display:flex; align-items:flex-start; gap:8px; margin:0 0 4px; font-size:12.5px; color:var(--fg); cursor:pointer; line-height:1.5;}
+  .agree input{width:auto; margin-top:2px; accent-color:var(--acc);}
+  .agree .mut{color:var(--mut); font-size:11.5px; margin-top:6px;}
+
+  /* 主布局 */
+  #app{display:grid; grid-template-columns:230px 1fr; min-height:100vh;}
+  #sidebar{background:var(--side); color:var(--side-fg); padding:18px 12px; display:flex; flex-direction:column;}
+  #sidebar .brand{display:flex; align-items:center; gap:10px; padding:6px 10px 18px;}
+  #sidebar .brand .mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-weight:800;font-size:16px;display:flex;align-items:center;justify-content:center;}
+  #sidebar .brand .t{font-weight:800; font-size:16px;}
+  #sidebar .brand .s{font-size:11px; color:var(--side-mut);}
+  .menu-group{margin-bottom:6px;}
+  .menu-group>.ghead{display:flex; align-items:center; gap:8px; padding:9px 12px; border-radius:10px; color:var(--side-mut); font-size:12px; letter-spacing:1px; cursor:pointer; user-select:none;}
+  .menu-group>.ghead:hover{background:rgba(255,255,255,.05);}
+  .menu-group>.ghead .arw{margin-left:auto; transition:transform .2s;}
+  .menu-group.open>.ghead .arw{transform:rotate(90deg);}
+  .menu-group.open>.ghead{color:var(--side-fg);}
+  .menu-items{display:none; padding-left:10px;}
+  .menu-group.open .menu-items{display:block;}
+  .menu-item{display:flex; align-items:center; gap:9px; padding:9px 12px; border-radius:10px; color:var(--side-mut); cursor:pointer; margin:2px 0; font-size:13.5px;}
+  .menu-item:hover{background:rgba(255,255,255,.06); color:var(--side-fg);}
+  .menu-item.on{background:var(--acc); color:#fff; font-weight:600;}
+  .menu-item .ic{width:16px; text-align:center;}
+
+  #mainwrap{display:flex; flex-direction:column; min-width:0;}
+  #topbar{display:flex; align-items:center; gap:14px; padding:14px 26px; background:var(--panel); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:10;}
+  #topbar .tt{font-size:16px; font-weight:700;}
+  #topbar .acc-chip{display:flex; align-items:center; gap:8px; background:var(--panel2); border:1px solid var(--border); border-radius:12px; padding:6px 12px; font-size:12.5px;}
+  #topbar .sp{flex:1;}
+  #topbar .btn{display:flex; align-items:center; gap:6px;}
+  #content{padding:22px 26px 60px; overflow-y:auto;}
+
+  /* 卡片/面板 */
+  .panel{background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:22px; margin-bottom:16px; box-shadow:var(--shadow);}
+  .panel>h2{font-size:16px; margin-bottom:16px; display:flex; align-items:center; gap:8px;}
+  .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; margin-bottom:16px;}
+  .stat{background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:18px; box-shadow:var(--shadow);}
+  .stat .k{font-size:12px; color:var(--mut);}
+  .stat .v{font-size:24px; font-weight:800; margin-top:6px;}
+  .stat .v.acc{color:var(--acc);} .stat .v.ok{color:var(--ok);} .stat .v.err{color:var(--err);} .stat .v.warn{color:var(--warn);}
+  .balance-hero{background:linear-gradient(135deg,var(--acc),var(--acc2)); color:#fff; border-radius:20px; padding:26px; margin-bottom:18px; box-shadow:var(--shadow);}
+  .balance-hero .k{font-size:12.5px; opacity:.85;}
+  .balance-hero .v{font-size:34px; font-weight:800; margin-top:8px;}
+  .balance-hero .sub{margin-top:10px; font-size:12.5px; opacity:.9;}
+  table{width:100%; border-collapse:collapse; font-size:13.5px;}
+  th{color:var(--mut); font-weight:600; text-align:left; padding:10px 8px; border-bottom:1px solid var(--border); white-space:nowrap;}
+  td{padding:10px 8px; border-bottom:1px solid var(--border); vertical-align:top;}
+  tr:hover td{background:var(--panel2);}
+  .field{margin-bottom:14px;}
+  .field label{display:block; color:var(--mut); font-size:12.5px; margin-bottom:6px;}
+  .field input,.field select{width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:12px; padding:10px 13px; font-size:13.5px; outline:none;}
+  .field input:focus,.field select:focus{border-color:var(--acc); box-shadow:0 0 0 3px rgba(10,79,158,.12);}
+  .tag{display:inline-block; padding:3px 10px; border-radius:980px; font-size:11.5px; font-weight:600;}
+  .tag.Confirmed{background:#e7f5ec;color:var(--ok);}
+  .tag.Pending{background:#fdf3e3;color:var(--warn);}
+  .tag.Rejected{background:#fbe9ec;color:var(--err);}
+  .tag.Error{background:#fbe9ec;color:var(--err);}
+  .inc{color:var(--ok);} .exp{color:var(--err);}
+
+  /* 账单折叠 */
+  .month-row{border:1px solid var(--border); border-radius:14px; margin-bottom:10px; overflow:hidden; background:var(--panel);}
+  .month-head{display:flex; align-items:center; gap:12px; padding:13px 16px; cursor:pointer; font-weight:600;}
+  .month-head:hover{background:var(--panel2);}
+  .month-head .mh{font-size:14px; width:78px;}
+  .month-head .mut{font-weight:400; font-size:12px;}
+  .month-head .sp{flex:1;}
+  .month-head .num{font-size:13px;}
+  .month-body{display:none; border-top:1px solid var(--border); background:var(--panel2);}
+  .month-row.open .month-body{display:block;}
+  .day-row{border-top:1px solid var(--border);}
+  .day-row>.day-head{display:flex; align-items:center; gap:10px; padding:10px 16px; cursor:pointer; background:rgba(255,255,255,.5); font-size:13px; font-weight:600;}
+  .day-row>.day-head .sp{flex:1;}
+  .day-items{display:none;}
+  .day-row.open .day-items{display:block;}
+  .txline{display:flex; align-items:center; gap:12px; padding:9px 16px 9px 34px; font-size:13px; border-top:1px solid var(--border);}
+  .txline .who{flex:1; min-width:0;}
+  .txline .amt{font-weight:700;}
+
+  /* 主题预设 */
+  .preset-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px;}
+  .preset{border:2px solid var(--border); border-radius:14px; padding:12px; text-align:center; cursor:pointer; background:var(--panel);}
+  .preset.on{border-color:var(--acc);}
+  .preset .dot{width:30px;height:30px;border-radius:8px;margin:0 auto 8px;}
+  .preset .n{font-size:12.5px; font-weight:600;}
+
+  /* 弹窗 */
+  #modal-wrap{position:fixed; inset:0; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; z-index:60; padding:20px;}
+  #modal{width:440px; max-width:94vw; max-height:90vh; overflow-y:auto; background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:22px; box-shadow:var(--shadow);}
+  #modal h3{margin-bottom:16px; color:var(--acc); font-size:16px;}
+  #modal .row{display:flex; gap:10px; justify-content:flex-end; margin-top:18px;}
+  #modal .error{color:var(--err); margin-top:10px; font-size:13px;}
+
+  /* 文档阅读 */
+  #docwrap{position:fixed; inset:0; background:var(--panel); z-index:80; display:flex; flex-direction:column;}
+  #docwrap .docbar{display:flex; align-items:center; gap:12px; padding:12px 20px; background:var(--side); color:#fff;}
+  #docwrap .docbar b{font-size:15px;}
+  #docwrap .docbar .sp{flex:1;}
+  #docwrap .docbar button{background:#fff; color:var(--acc); border:none; border-radius:10px; padding:7px 18px; font-weight:600;}
+  #docframe{flex:1; width:100%; border:none; background:#fff;}
+
+  .msgbox{position:fixed; top:18px; left:50%; transform:translateX(-50%); background:var(--panel); border:1px solid var(--acc); color:var(--fg); padding:11px 20px; border-radius:12px; z-index:100; box-shadow:var(--shadow); font-size:13px;}
+  .msgbox.err{border-color:var(--err);}
+  .upd-dl{display:flex; gap:8px; margin-top:12px; align-items:center; flex-wrap:wrap;}
+  .list-row{display:flex; align-items:center; gap:10px; padding:11px 14px; border:1px solid var(--border); border-radius:12px; margin-bottom:8px; background:var(--panel);}
+  .list-row .g{flex:1;}
+  .chart-svg{width:100%; height:100%;}
+  .chartbox{width:100%; height:280px;}
+  .tut-step{display:flex; gap:12px; margin-bottom:16px;}
+  .tut-step .n{width:26px;height:26px;border-radius:50%;background:var(--acc);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex:none;margin-top:2px;}
+  .tut-step .b{font-size:13.5px; line-height:1.7;}
+</style>
+</head>
+<body>
+<!-- 登录 / 注册 -->
+<div id="auth">
+  <div class="auth-card">
+    <div class="auth-brand"><span class="mark">A€</span><div><div class="t">Alpha Coin</div><div class="s">A€ 钱包 · 中心化结算</div></div></div>
+    <div id="auth-body"></div>
+    <div class="err" id="auth-err"></div>
+  </div>
+</div>
+
+<!-- 主应用 -->
+<div id="app" class="hidden">
+  <aside id="sidebar"></aside>
+  <div id="mainwrap">
+    <div id="topbar">
+      <span class="tt" id="pageTitle"></span>
+      <span class="acc-chip">👤 <span id="who"></span></span>
+      <span class="acc-chip">💠 <span id="balChip"></span> A€</span>
+      <span class="sp"></span>
+      <span class="muted" id="syncstate"></span>
+      <button class="btn ghost sm" id="btn-sync">⟳ 刷新</button>
+      <button class="btn ghost sm" title="主题切换" onclick="togglePreset()">🎨</button>
+      <button class="btn ghost sm" onclick="quitApp()">退出</button>
+    </div>
+    <div id="content"></div>
+  </div>
+</div>
+
+<!-- 模态弹窗 -->
+<div id="modal-wrap" class="hidden">
+  <div id="modal">
+    <h3 id="modal-title"></h3>
+    <div id="modal-body"></div>
+    <div class="error" id="modal-error"></div>
+    <div class="row">
+      <button class="btn ghost" id="modal-cancel">取消</button>
+      <button class="btn" id="modal-ok">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="msgbox" class="hidden"></div>
+
+<!-- 协议 / 隐私阅读 -->
+<div id="docwrap" class="hidden">
+  <div class="docbar"><b id="doctitle"></b><span class="sp"></span><button id="doc-close">返回</button></div>
+  <iframe id="docframe" sandbox=""></iframe>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const V = '3.0.0';
+let state = { logged_in:false };
+let view = 'balance';
+let openGroups = {};   // 侧边栏展开的组
+let pendingList = [];
+
+// ---------- 工具 ----------
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtTs(t){ if(!t) return '从未'; const d=new Date(t*1000); return d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+function fmt(n){ return (n??0).toLocaleString(); }
+function fmtMoney(n, sign){ const s=(n??0)<0?'-':''; const v=Math.abs(n??0).toLocaleString(); return (sign && (n??0)>0? '+':'')+s+v; }
+function typeCn(t){ return {Individual:'个人',Company:'企业',Country:'国家',System:'系统'}[t]||t||''; }
+
+// ---------- 主题 ----------
+const PRESETS = { cblue:'经典蓝', emerald:'翡翠绿', wine:'酒红', noir:'曜黑', navy:'深蓝' };
+function applyPreset(){
+  const p = localStorage.getItem('acs_preset') || 'cblue';
+  document.documentElement.setAttribute('data-preset', p);
+}
+function togglePreset(){ const cur=document.documentElement.getAttribute('data-preset'); const keys=Object.keys(PRESETS); const next=keys[(keys.indexOf(cur)+1)%keys.length]; setPreset(next); }
+function setPreset(p){ document.documentElement.setAttribute('data-preset',p); localStorage.setItem('acs_preset',p); document.querySelectorAll('.preset').forEach(el=>el.classList.toggle('on',el.dataset.p===p)); }
+
+// ---------- 协议 / 隐私 ----------
+function termsDocInfo(type){ if(type==='Individual') return {kind:'individual-terms', name:'《个人使用协议》'}; return {kind:'enterprise-terms', name:'《企业使用协议》'}; }
+async function openDoc(kind, title){
+  try { const html=await invoke('legal_doc',{doc:kind}); $('doctitle').textContent=title||'阅读'; $('docframe').srcdoc=html; $('docwrap').classList.remove('hidden'); }
+  catch(e){ toast('文档加载失败：'+(e||''), true); }
+}
+function closeDoc(){ $('docwrap').classList.add('hidden'); $('docframe').srcdoc=''; }
+function docLink(kind,title){ return `<a data-doc="${kind}" data-title="${esc(title)}">${esc(title)}</a>`; }
+
+// ---------- invoke / api ----------
+async function invoke(cmd, args){ return window.__TAURI__.core.invoke(cmd, args || {}); }
+async function api(path, body){
+  const cmd = API_MAP[path]; if(!cmd) throw new Error('未知接口：'+path);
+  const r = await invoke(cmd, Object.assign({}, body));
+  if(r && typeof r==='object' && 'ok' in r) return r;
+  if(r && typeof r==='object' && 'message' in r) return { ok:true, message:r.message };
+  return { ok:true, message:'', ...(r && typeof r==='object'?r:{}) };
+}
+const API_MAP = { '/api/state':'state','/api/login':'login','/api/register':'register','/api/logout':'logout','/api/sync':'sync','/api/transfer':'transfer','/api/confirm':'confirm','/api/reject':'reject','/api/pending':'pending','/api/set-server':'set_server','/api/delete-account':'delete_account','/api/members':'members' };
+function toast(msg, isErr){ const m=$('msgbox'); m.textContent=msg; m.className='msgbox'+(isErr?' err':''); clearTimeout(m._t); m._t=setTimeout(()=>m.classList.add('hidden'),4000); }
+
+// ---------- 登录 ----------
+function authAgreeRender(){
+  const wrap=$('auth-agree-wrap'); if(!wrap) return;
+  const type=$('auth-type')?$('auth-type').value:'Individual'; const t=termsDocInfo(type);
+  const title=type==='Individual'?'A€ 使用协议（个人用户）':'A€ 使用协议（企业 / 成员实体）';
+  wrap.innerHTML=`<label><input type="checkbox" id="ag-terms"> 我已阅读并同意 ${docLink(t.kind,title)}</label>
+    <label><input type="checkbox" id="ag-privacy"> 我已阅读并同意 ${docLink('privacy','Alpha Coin 隐私政策')}</label>
+    <div class="mut">请仔细阅读并勾选同意后方可登录 / 注册；未勾选不会向服务器发送请求。</div>`;
+  bindDocLinks(wrap);
+}
+function agreeChecked(){ return !!($('ag-terms')&&$('ag-terms').checked) && !!($('ag-privacy')&&$('ag-privacy').checked); }
+
+function renderAuth(){
+  const body=$('auth-body');
+  if(state.logged_in){ $('auth').classList.add('hidden'); $('app').classList.remove('hidden'); render(); return; }
+  $('app').classList.add('hidden'); $('auth').classList.remove('hidden');
+  if(!state.server_url){
+    body.innerHTML=`<p class="muted" style="text-align:center;margin:6px 0 10px;">第一步 · 配置中心服务器</p>
+      <label>中心服务器地址</label><input id="auth-server" placeholder="https://acsystem.maxshin.top">
+      <div class="muted" style="font-size:12px;margin:6px 0 2px;">留空则使用默认 https://acsystem.maxshin.top</div>
+      <div class="btns"><button class="btn" id="auth-saveserver">保存并继续</button></div>`;
+    $('auth-saveserver').onclick=async()=>{ const url=($('auth-server').value||'').trim()||'https://acsystem.maxshin.top'; const r=await api('/api/set-server',{url}); if(r.ok){ await refresh(); } else $('auth-err').textContent=r.message; };
+    $('auth-err').textContent=''; return;
+  }
+  body.innerHTML=`<label>账户类型</label>
+    <select id="auth-type" onchange="authTypeChange()">
+      <option value="Individual">个人账户</option><option value="Company">企业账户（银行）</option>
+      <option value="Country">国家账户</option><option value="System">系统账户</option></select>
+    <div id="auth-uid-wrap"></div>
+    <label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">
+    <div class="agree" id="auth-agree-wrap"></div>
+    <div class="btns"><button class="btn" id="auth-login">登 录</button><button class="btn ghost" id="auth-register">注册新账户</button></div>`;
+  authTypeChange();
+  $('auth-login').onclick=async()=>{
+    const uid=($('auth-uid').value||'').trim(); const pass=$('auth-pass').value;
+    if(!uid){ $('auth-err').textContent='请输入或选择账户 UID'; return; }
+    if(pass.length<8){ $('auth-err').textContent='密码至少 8 位'; return; }
+    if(!agreeChecked()){ $('auth-err').textContent='请先勾选同意《使用协议》与《隐私政策》'; return; }
+    const r=await api('/api/login',{uid,password:pass,agree_terms:true,agree_privacy:true});
+    if(r.ok){ view='balance'; await refresh(); toast(r.message); } else { $('auth-err').textContent=r.message; }
+  };
+  $('auth-register').onclick=()=>openModal('register',{});
+  $('auth-err').textContent='';
+  loadMembersCache().then(authTypeChange);
+}
+function authTypeChange(){
+  const sel=$('auth-type'), wrap=$('auth-uid-wrap'); if(!sel||!wrap) return;
+  const t=sel.value;
+  if(t==='Individual'){ wrap.innerHTML=`<label>账户 UID</label><input id="auth-uid" placeholder="如 Steve">`; }
+  else if(t==='Company'){ const o=(memberLists.companies||[]).map(c=>`<option>${esc(c)}</option>`).join(''); wrap.innerHTML=`<label>企业名称（仅 AEU 已认定）</label><select id="auth-uid">${o||'<option value="">（暂无已认定企业）</option>'}</select>`; }
+  else if(t==='Country'){ const o=(memberLists.countries||[]).map(c=>`<option>${esc(c)}</option>`).join(''); wrap.innerHTML=`<label>国家名称（仅 AEU 已认定）</label><select id="auth-uid">${o||'<option value="">（暂无已认定国家）</option>'}</select>`; }
+  else { const o=(memberLists.systems||[]).map(c=>`<option>${esc(c)}</option>`).join(''); wrap.innerHTML=`<label>系统账户</label><select id="auth-uid">${o||'<option value="">（暂无）</option>'}</select>`; }
+  authAgreeRender();
+}
+function bindDocLinks(root){ root.querySelectorAll('a[data-doc]').forEach(a=>{ a.onclick=(e)=>{ e.preventDefault(); openDoc(a.dataset.doc,a.dataset.title); }; }); }
+
+// ---------- 渲染 ----------
+const MENU = [
+  { group:'交易', icon:'⇄', items:[ {k:'transfer',ic:'↗',label:'转账'}, {k:'inbox',ic:'📥',label:'待收箱'} ]},
+  { group:'账单', icon:'▤', items:[ {k:'flow',ic:'📈',label:'流水图'}, {k:'statement',ic:'🗂',label:'月度 · 总账'} ]},
+  { group:'个人', icon:'👤', items:[ {k:'profile',ic:'🪪',label:'账户信息'}, {k:'balance',ic:'💠',label:'余额'}, {k:'logout',ic:'⇥',label:'退出登录'}, {k:'delete',ic:'🗑',label:'注销账户'} ]},
+  { group:'设置', icon:'⚙', items:[ {k:'personalize',ic:'🎨',label:'界面个性化'}, {k:'server',ic:'🌐',label:'中心地址'}, {k:'tutorial',ic:'📖',label:'使用教程'}, {k:'terms',ic:'📜',label:'用户协议'}, {k:'privacy',ic:'🔒',label:'隐私政策'}, {k:'opensource',ic:'🧩',label:'开源协议'}, {k:'update',ic:'⬆',label:'检查更新'}, {k:'about',ic:'ℹ',label:'关于软件'} ]}
+];
+const TITLES = { transfer:'转账', inbox:'待收箱', flow:'流水图', statement:'月度 · 总账', profile:'账户信息', balance:'余额', logout:'退出登录', delete:'注销账户', personalize:'界面个性化', server:'中心地址', tutorial:'使用教程', terms:'用户协议', privacy:'隐私政策', opensource:'开源协议', update:'检查更新', about:'关于软件' };
+function groupOf(k){ return MENU.find(g=>g.items.some(i=>i.k===k)); }
+
+function render(){
+  applyPreset();
+  renderSidebar();
+  renderTop();
+  renderContent();
+}
+function renderTop(){
+  const u = state.logged_in ? `${state.uid} · ${typeCn(state.atype)}` : '';
+  $('who').textContent = u;
+  $('balChip').textContent = fmt(state.balance);
+  $('syncstate').textContent = state.logged_in ? (state.synced_at ? `已刷新 ${fmtTs(state.synced_at)}` : '尚未刷新') : '';
+  $('pageTitle').textContent = TITLES[view] || '';
+}
+function renderSidebar(){
+  const sb=$('sidebar');
+  if(!openGroups[view]) { const g=groupOf(view); if(g) openGroups[g.group]=true; }
+  let html=`<div class="brand"><span class="mark">A€</span><div><div class="t">Alpha Coin</div><div class="s">${esc(state.uid||'')} · ${typeCn(state.atype)}</div></div></div>`;
+  MENU.forEach(g=>{
+    const open=!!openGroups[g.group];
+    html+=`<div class="menu-group ${open?'open':''}" data-group="${esc(g.group)}">
+      <div class="ghead" onclick="toggleGroup('${esc(g.group)}')">${g.icon} ${esc(g.group)}<span class="arw">▸</span></div>
+      <div class="menu-items">`+
+      g.items.map(it=>`<div class="menu-item ${view===it.k?'on':''}" data-view="${it.k}"><span class="ic">${it.ic}</span>${esc(it.label)}</div>`).join('')+
+      `</div></div>`;
+  });
+  sb.innerHTML=html;
+  sb.querySelectorAll('.menu-item[data-view]').forEach(el=>{ el.onclick=()=>{ view=el.dataset.view; render(); }; });
+  sb.querySelectorAll('.preset').forEach(()=>{});
+}
+function toggleGroup(name){
+  openGroups[name]=!openGroups[name];
+  const el=document.querySelector(`.menu-group[data-group="${name}"]`);
+  if(el) el.classList.toggle('open', !!openGroups[name]);
+}
+
+function renderContent(){
+  const c=$('content');
+  const fn = RENDER[view] || renderBalance;
+  c.innerHTML = fn();
+  bindDocLinks(c);
+  c.querySelectorAll('button[data-act]').forEach(b=>{ b.onclick=()=>runAction(b.dataset.act, b.dataset); });
+  if(view==='inbox') loadInbox();
+}
+
+// ---------- 视图 ----------
+function renderBalance(){
+  return `<div class="balance-hero"><div class="k">账户余额（中心口径）</div><div class="v">${fmt(state.balance)} <span style="font-size:18px">A€</span></div>
+    <div class="sub">UID ${esc(state.uid)} · ${typeCn(state.atype)}${state.email?(' · '+esc(state.email)):''}</div></div>
+    <div class="cards">
+      <div class="stat"><div class="k">账户类型</div><div class="v">${typeCn(state.atype)}</div></div>
+      <div class="stat"><div class="k">中心服务器</div><div class="v" style="font-size:14px">${esc(state.server_url||'未配置')}</div></div>
+      <div class="stat"><div class="k">最近刷新</div><div class="v" style="font-size:15px">${state.synced_at?fmtTs(state.synced_at):'从未'}</div></div>
+    </div>
+    <div class="panel"><h2>快捷操作</h2><div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn" data-act="transfer">转账</button><button class="btn ghost" data-act="refresh">刷新</button><button class="btn ghost" data-act="showflow">查看流水</button></div></div>`;
+}
+function renderProfile(){
+  return `<div class="panel"><h2>账户信息</h2>
+    <table><tr><th>UID</th><td>${esc(state.uid)}</td></tr><tr><th>账户类型</th><td>${typeCn(state.atype)}</td></tr>
+    <tr><th>邮箱</th><td>${esc(state.email)}</td></tr><tr><th>余额</th><td>${fmt(state.balance)} A€</td></tr>
+    <tr><th>中心服务器</th><td>${esc(state.server_url||'未配置')}</td></tr><tr><th>最近刷新</th><td>${state.synced_at?fmtTs(state.synced_at):'从未'}</td></tr></table></div>`;
+}
+function renderTransfer(){
+  return `<div class="panel"><h2>转账</h2>
+    <div class="field"><label>接收方 UID（可带 @类型，如 Steve 或 AlphaEU@System）</label><input id="f-to" placeholder="输入接收方"></div>
+    <div class="field"><label>金额（A€）</label><input id="f-amt" type="number" min="1" placeholder="0"></div>
+    <div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>
+    <div class="error" id="f-err"></div>
+    <button class="btn" data-act="do-transfer">确认转账</button></div>`;
+}
+function runAction(act, ds){
+  if(act==='transfer'){ openModal('transfer',{}); }
+  else if(act==='refresh'){ doSync(true); }
+  else if(act==='showflow'){ view='flow'; render(); }
+  else if(act==='do-transfer'){ doTransfer(); }
+  else if(act==='check-update'){ checkUpdate(true); }
+  else if(act==='save-server'){ saveServer(); }
+  else if(act==='logout'){ doLogout(); }
+  else if(act==='delete'){ openModal('close',{}); }
+  else if(act==='inbox-accept'||act==='inbox-reject'){ pendingAction(+ds.i, act==='inbox-reject'?'reject':'accept'); }
+}
+async function saveServer(){
+  const u=$('s-url').value; if(!u){ if($('s-err'))$('s-err').textContent='请输入中心地址'; return; }
+  const r=await api('/api/set-server',{url:u});
+  if(r.ok){ toast(r.message); state.server_url=u.trim().replace(/\/+$/,''); render(); } else if($('s-err')) $('s-err').textContent=r.message;
+}
+async function doTransfer(){
+  const err=$('f-err'); if(!err) return;
+  const to=$('f-to').value, amt=parseInt($('f-amt').value||'0'), pass=$('f-pass').value;
+  if(!to){ err.textContent='请输入接收方'; return; }
+  if(!(amt>0)){ err.textContent='金额须大于 0'; return; }
+  if(pass.length<8){ err.textContent='口令至少 8 位'; return; }
+  try{ const r=await api('/api/transfer',{to,amount:amt,password:pass}); if(r.ok){ toast(r.message); $('f-amt').value=''; $('f-pass').value=''; } else err.textContent=r.message; }
+  catch(e){ err.textContent=e||'转账失败'; }
+}
+function renderInbox(){
+  return `<div class="panel"><h2>待收箱</h2><div id="inboxList"><p class="muted">正在加载待确认交易…</p></div></div>`;
+}
+async function loadInbox(){
+  const el=$('inboxList'); if(!el) return;
+  let items=[]; try{ const r=await api('/api/pending'); items=r.items||[]; }catch(e){ el.innerHTML='<p class="muted">加载失败：'+(e||'')+'</p>'; return; }
+  if(!items.length){ el.innerHTML='<p class="muted">当前没有待确认交易。</p>'; return; }
+  el.innerHTML=`<table><thead><tr><th>发送方</th><th>类型</th><th>金额</th><th>时间</th><th style="width:140px">操作</th></tr></thead><tbody>`+
+    items.map((it,i)=>`<tr><td class="mono">${esc(it.sender)}</td><td>${esc(it.tx_type)}</td><td class="mono">${fmt(it.amount)} A€</td><td>${fmtTs(it.timestamp)}</td>
+      <td><button class="btn ok sm" data-act="inbox-accept" data-i="${i}">接受</button> <button class="btn danger sm" data-act="inbox-reject" data-i="${i}">拒收</button></td></tr>`).join('')+`</tbody></table>`;
+  el.querySelectorAll('button[data-act]').forEach(b=>{ b.onclick=()=>pendingAction(+b.dataset.i, b.dataset.act==='inbox-reject'?'reject':'accept'); });
+}
+function renderFlow(){
+  const txs=(state.txs||[]).map(t=>({ts:t[5],amount:Math.abs(t[4]),dir:t[7]})).sort((a,b)=>a.ts-b.ts);
+  if(!txs.length) return `<div class="panel"><h2>流水图</h2><p class="muted">暂无交易，刷新后可见。</p></div>`;
+  // 累计余额曲线（net 累积）
+  let cum=0, pts=txs.map(t=>{ cum+= t.dir>=0?t.amount:-t.amount; return {d:new Date(t.ts*1000), v:cum}; });
+  const svg=drawFlowSVG(pts);
+  return `<div class="panel"><h2>流水图 · 累计余额走势</h2><div class="chartbox">${svg}</div></div>`;
+}
+function drawFlowSVG(pts){
+  const W=860,H=300,padL=60,padR=20,padT=20,padB=38;
+  const min=Math.min(...pts.map(p=>p.v),0), max=Math.max(...pts.map(p=>p.v),1);
+  const innerW=W-padL-padR, innerH=H-padT-padB;
+  const range=(max-min)||1;
+  const x=i=>padL+(pts.length===1?innerW/2:(innerW*i)/(pts.length-1));
+  const y=v=>padT+innerH-((v-min)/range)*innerH;
+  let path=pts.map((p,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+  let area=path+` L${x(pts.length-1).toFixed(1)},${(padT+innerH).toFixed(1)} L${x(0).toFixed(1)},${(padT+innerH).toFixed(1)} Z`;
+  const labels=pts.map((p,i)=> (i%Math.max(1,Math.floor(pts.length/6))===0||i===pts.length-1) ? `<text x="${x(i).toFixed(1)}" y="${H-12}" text-anchor="middle" font-size="11" fill="var(--mut)">${p.d.getMonth()+1}/${p.d.getDate()}</text>`:'').join('');
+  const vals=pts.map((p,i)=> (i%Math.max(1,Math.floor(pts.length/6))===0||i===pts.length-1) ? `<text x="${x(i).toFixed(1)}" y="${(y(p.v)-8).toFixed(1)}" text-anchor="middle" font-size="11" fill="var(--fg)">${fmt(p.v)}</text>`:'').join('');
+  let yt=''; for(let g=0;g<=4;g++){ const v=min+(range*g)/4; const yy=y(v); yt+=`<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${W-padR}" y2="${yy.toFixed(1)}" stroke="var(--border)"/><text x="${padL-8}" y="${(yy+4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--mut)">${fmt(Math.round(v))}</text>`; }
+  return `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet"><defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--acc)" stop-opacity=".25"/><stop offset="1" stop-color="var(--acc)" stop-opacity="0"/></linearGradient></defs>${yt}${area?`<path d="${area}" fill="url(#ag)"/>`:''}<path d="${path}" fill="none" stroke="var(--acc)" stroke-width="2.5" stroke-linejoin="round"/>${labels}${vals}</svg>`;
+}
+function renderStatement(){
+  const raw=(state.txs||[]).map(t=>({id:t[0],type:t[1],peer:t[2],ptype:t[3],amount:t[4],ts:t[5],status:t[6],dir:t[7]})).sort((a,b)=>a.ts-b.ts);
+  if(!raw.length) return `<div class="panel"><h2>月度 · 总账</h2><p class="muted">暂无交易，刷新后可见。</p></div>`;
+  let totInc=0,totExp=0,totNet=0, days={};
+  raw.forEach(tx=>{ const d=new Date(tx.ts*1000); const day=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); const mon=day.slice(0,7); const amt=Math.abs(tx.amount); (days[mon]=days[mon]||{}); (days[mon][day]=days[mon][day]||[]).push(tx); if(tx.dir>=0) totInc+=amt; else totExp+=amt; });
+  totNet=totInc-totExp;
+  const months=Object.keys(days).sort().reverse();
+  let html=`<div class="cards">
+    <div class="stat"><div class="k">总收入</div><div class="v ok">+${fmt(totInc)}</div></div>
+    <div class="stat"><div class="k">总支出</div><div class="v err">-${fmt(totExp)}</div></div>
+    <div class="stat"><div class="k">净额</div><div class="v acc">${totNet>=0?'+':''}${fmt(totNet)}</div></div>
+    <div class="stat"><div class="k">笔数</div><div class="v">${raw.length}</div></div></div>`;
+  html+='<div class="panel"><h2>月度收支 · 总账（无交易月份不显示）</h2>';
+  months.forEach(mon=>{
+    const ds=days[mon], dkeys=Object.keys(ds).sort().reverse();
+    let inc=0,exp=0,count=0; dkeys.forEach(dk=>ds[dk].forEach(tx=>{count++; const amt=Math.abs(tx.amount); if(tx.dir>=0) inc+=amt; else exp+=amt;}));
+    html+=`<div class="month-row" data-m="${mon}"><div class="month-head" onclick="this.parentNode.classList.toggle('open')">
+      <span class="mh">${mon}</span><span class="mut">${count} 笔</span><span class="sp"></span>
+      <span class="inc num">+${fmt(inc)}</span><span class="exp num">-${fmt(exp)}</span><span class="num">净 ${inc-exp>=0?'+':''}${fmt(inc-exp)}</span></div><div class="month-body">`;
+    dkeys.forEach(dk=>{
+      const dayTxs=ds[dk]; let dInc=0,dExp=0; dayTxs.forEach(tx=>{ const amt=Math.abs(tx.amount); if(tx.dir>=0) dInc+=amt; else dExp+=amt; });
+      html+=`<div class="day-row" data-d="${dk}"><div class="day-head" onclick="this.parentNode.classList.toggle('open')"><span>${dk}</span><span class="mut">${dayTxs.length} 笔</span><span class="sp"></span><span class="inc">+${fmt(dInc)}</span><span class="exp">-${fmt(dExp)}</span></div><div class="day-items">`;
+      dayTxs.forEach(tx=>{ html+=txLine(tx); });
+      html+='</div></div>';
+    });
+    html+='</div></div>';
+  });
+  html+='</div>';
+  return html;
+}
+function txLine(tx){
+  const isIn=tx.dir>=0;
+  const amt=(isIn?'+':'-')+fmt(Math.abs(tx.amount));
+  const who=`${esc(tx.peer)}${tx.ptype?(' · '+typeCn(tx.ptype)):''}`;
+  return `<div class="txline"><span class="muted">${fmtTs(tx.ts).slice(5)}</span><span class="who">${who} <span class="muted">${esc(tx.type)} ${statusTag(tx.status)}</span></span><span class="amt ${isIn?'inc':'exp'}">${amt} A€</span></div>`;
+}
+function statusTag(s){ const m={Confirmed:'已确认',Pending:'待处理',Rejected:'已拒收',Error:'错误'}; return `<span class="tag ${esc(s)}">${m[s]||esc(s)}</span>`; }
+
+function renderLogout(){
+  return `<div class="panel"><h2>退出登录</h2><p class="muted">退出后将返回登录界面；本机账户信息与账本仍保留在本地。</p>
+    <div style="margin-top:16px"><button class="btn danger" data-act="logout">确认退出登录</button></div></div>`;
+}
+async function doLogout(){ await api('/api/logout',null); await refresh(); view='balance'; }
+function renderDelete(){
+  return `<div class="panel"><h2>注销账户（不可撤销）</h2>
+    <p class="muted">注销后：中心账户状态改为「已注销」，账户与账本只读保留供审计，<b>不可再登录</b>；本机记录与密钥将被删除。</p>
+    <div class="field" style="margin-top:14px"><label>输入钱包口令以确认注销</label><input id="d-pass" type="password" placeholder="≥8 位"></div>
+    <div class="error" id="d-err"></div><button class="btn danger" data-act="delete">确认注销</button></div>`;
+}
+function renderPersonalize(){
+  let html='<div class="panel"><h2>界面个性化</h2><div class="preset-grid">';
+  Object.keys(PRESETS).forEach(p=>{ const colors={cblue:['#0a4f9e','#0a6cd6'],emerald:['#0f7d5a','#16a06e'],wine:['#8f1d3c','#b02348'],noir:['#10131a','#6ea8ff'],navy:['#0d1524','#3d8bfd']}[p]; html+=`<div class="preset ${document.documentElement.getAttribute('data-preset')===p?'on':''}" data-p="${p}" onclick="setPreset('${p}');renderContent()"><div class="dot" style="background:linear-gradient(135deg,${colors[0]},${colors[1]})"></div><div class="n">${PRESETS[p]}</div></div>`; });
+  html+='</div><p class="muted" style="margin-top:14px">选择后立即生效，并自动保存。顶栏 🎨 按钮可快速轮换主题。</p></div>';
+  return html;
+}
+function renderServer(){
+  return `<div class="panel"><h2>中心地址</h2>
+    <div class="field"><label>中心服务器地址</label><input id="s-url" placeholder="https://acsystem.maxshin.top" value="${esc(state.server_url||'')}"></div>
+    <div class="error" id="s-err"></div><button class="btn" data-act="save-server">保存</button></div>`;
+}
+async function saveServer(){ const url=$('s-url').value; const r=await api('/api/set-server',{url}); if(r.ok){ toast(r.message); state.server_url=url.trim().replace(/\/+$/,''); render(); } else $('s-err').textContent=r.message; }
+function renderTutorial(){
+  const steps=[['下载与安装','从官方网站或 GitHub 下载最新安装包（acs-client-{版本}-windows-x64-setup.exe），运行安装。'],
+    ['登录 / 注册','打开钱包，选择账户类型并输入 UID 与密码登录；首次使用请先注册，并勾选同意《使用协议》与《隐私政策》。'],
+    ['刷新账本','登录后会自动刷新；也可点顶栏「刷新」拉取最新账本。'],
+    ['转账','进入「交易 · 转账」，填写接收方 UID、金额与钱包口令，确认即可（签名后直接提交，无二次确认）。'],
+    ['收款','进入「交易 · 待收箱」，可「接受」或「拒收」待确认交易。'],
+    ['账单','进入「账单」查看流水图与月度/总账（按月份折叠，无交易月份不显示）。'],
+    ['设置','可在「设置」中切换界面主题、中心地址，查看协议/隐私/开源协议，检查更新。']];
+  return `<div class="panel"><h2>使用教程</h2>`+steps.map((s,i)=>`<div class="tut-step"><div class="n">${i+1}</div><div class="b"><b>${esc(s[0])}</b><br><span class="muted">${esc(s[1])}</span></div></div>`).join('')+`</div>`;
+}
+function renderTerms(){ return renderDocPage('individual-terms','A€ 使用协议（个人用户）'); }
+function renderPrivacy(){ return renderDocPage('privacy','Alpha Coin 隐私政策'); }
+function renderOpenSource(){ return `<div class="panel"><h2>开源协议</h2><p class="muted">本软件基于以下开源组件构建，遵循各自开源协议：</p><table><tr><th>组件</th><th>协议</th></tr><tr><td>Rust / Tauri 2</td><td>MIT / Apache-2.0</td></tr><tr><td>axum + tower-http</td><td>MIT</td></tr><tr><td>rusqlite (bundled SQLite)</td><td>MIT / Public Domain</td></tr><tr><td>serde / serde_json</td><td>MIT / Apache-2.0</td></tr><tr><td>chrono</td><td>MIT / Apache-2.0</td></tr><tr><td>ureq + native-tls</td><td>MIT</td></tr><tr><td>sha2 / uuid</td><td>MIT / Apache-2.0</td></tr><tr><td>aes-gcm</td><td>MIT / Apache-2.0</td></tr></table></div>`; }
+function renderUpdate(){ return `<div class="panel"><h2>检查更新</h2><p class="muted">当前版本 v${V}</p><div class="field" style="margin-top:10px"><button class="btn" data-act="check-update">立即检查更新</button></div><div id="upd-out"></div></div>`; }
+function renderAbout(){ return `<div class="panel"><h2>关于软件</h2>
+    <table><tr><th>名称</th><td>A€ 钱包（Alpha Coin Wallet）</td></tr><tr><th>版本</th><td>v${V}</td></tr>
+    <tr><th>归属</th><td>阿尔法经济联盟（AEU）</td></tr><tr><th>数据目录</th><td>~/.alpha_dir/acs-client</td></tr>
+    <tr><th>运行日志</th><td>数据目录下 *.alphalog（每次启动新建）</td></tr></table></div>`; }
+
+// 以全屏阅读方式展示协议/隐私
+function renderDocPage(kind,title){ openDoc(kind,title); return `<div class="panel"><h2>${esc(title)}</h2><p class="muted">已在阅读界面打开。</p></div>`; }
+
+const RENDER = { transfer:renderTransfer, inbox:renderInbox, flow:renderFlow, statement:renderStatement, profile:renderProfile, balance:renderBalance, logout:renderLogout, delete:renderDelete, personalize:renderPersonalize, server:renderServer, tutorial:renderTutorial, terms:renderTerms, privacy:renderPrivacy, opensource:renderOpenSource, update:renderUpdate, about:renderAbout };
+
+// ---------- 模态 ----------
+let memberLists = { countries:[], companies:[], systems:[] };
+async function loadMembersCache(){ try{ const r=await api('/api/members'); memberLists={countries:r.countries||[],companies:r.companies||[],systems:r.systems||[]}; }catch(e){ memberLists={countries:[],companies:[],systems:[]}; } }
+function renderRegisterModal(){
+  const body=$('modal-body'), err=$('modal-error');
+  body.innerHTML=`<div class="field"><label>账户类型</label><select id="r-type" onchange="regNameField()"><option value="Individual">个人账户</option><option value="Company">企业账户（银行）</option><option value="Country">国家账户</option></select></div>
+    <div class="field" id="r-name-wrap"></div><div class="field"><label>邮箱</label><input id="r-email" placeholder="如 Steve@maxshin.top"></div>
+    <div class="field"><label>口令（≥8 位，用于签名与登录取回）</label><input id="r-pass" type="password"></div><div class="agree" id="r-agree-wrap"></div>`;
+  regNameField(); regAgreeRender(); err.textContent='';
+  $('modal-ok').onclick=async()=>{ const uid=($('r-uid').value||'').trim(); if(!regAgreeChecked()){ err.textContent='请先勾选同意《使用协议》与《隐私政策》'; return; }
+    const r=await api('/api/register',{server_url:'',uid,atype:$('r-type').value,email:$('r-email').value,password:$('r-pass').value,agree_terms:true,agree_privacy:true});
+    if(r.ok){ closeModal(); toast(r.message); view='balance'; refresh(); } else err.textContent=r.message; };
+  $('modal-cancel').onclick=closeModal;
+}
+function regAgreeRender(){ const wrap=$('r-agree-wrap'); if(!wrap) return; const type=$('r-type').value; const t=termsDocInfo(type); const title=type==='Individual'?'A€ 使用协议（个人用户）':'A€ 使用协议（企业 / 成员实体）'; wrap.innerHTML=`<label><input type="checkbox" id="r-ag-terms"> 我已阅读并同意 ${docLink(t.kind,title)}</label><label><input type="checkbox" id="r-ag-privacy"> 我已阅读并同意 ${docLink('privacy','Alpha Coin 隐私政策')}</label><div class="mut">请仔细阅读并勾选同意后方可注册。</div>`; bindDocLinks(wrap); }
+function regAgreeChecked(){ return !!($('r-ag-terms')&&$('r-ag-terms').checked) && !!($('r-ag-privacy')&&$('r-ag-privacy').checked); }
+function regNameField(){ const t=$('r-type').value, wrap=$('r-name-wrap');
+  if(t==='Country'){ const o=memberLists.countries.map(c=>`<option>${esc(c)}</option>`).join(''); wrap.innerHTML=`<label>国家名称（仅 AEU 已认定）</label><select id="r-uid">${o||'<option value="">（暂无）</option>'}</select>`; }
+  else if(t==='Company'){ const o=memberLists.companies.map(c=>`<option>${esc(c)}</option>`).join(''); wrap.innerHTML=`<label>企业名称（仅 AEU 已认定）</label><select id="r-uid">${o||'<option value="">（暂无）</option>'}</select>`; }
+  else wrap.innerHTML=`<label>UID（唯一识别符）</label><input id="r-uid" placeholder="如 Steve">`;
+  regAgreeRender();
+}
+function openModal(kind,data){
+  const title=$('modal-title'), body=$('modal-body'), err=$('modal-error'); const ok=$('modal-ok'), cancel=$('modal-cancel');
+  err.textContent=''; ok.classList.remove('hidden'); ok.textContent='确定';
+  if(kind==='register'){ title.textContent='注册新账户'; body.innerHTML='<p class="muted">正在加载已认定成员列表…</p>'; $('modal-wrap').classList.remove('hidden'); loadMembersCache().then(()=>renderRegisterModal()); return; }
+  if(kind==='transfer'){ title.textContent='转账'; body.innerHTML=`<div class="field"><label>接收方 UID（可带 @类型）</label><input id="f-to" placeholder="如 Steve 或 AlphaEU@System"></div>
+    <div class="field"><label>金额（A€）</label><input id="f-amt" type="number" min="1" placeholder="0"></div><div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
+    $('modal-wrap').classList.remove('hidden');
+    ok.onclick=async()=>{ const r=await api('/api/transfer',{to:$('f-to').value,amount:parseInt($('f-amt').value||'0'),password:$('f-pass').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent=r.message; }; cancel.onclick=closeModal; return; }
+  if(kind==='close'){ title.textContent='注销账户（不可撤销）'; body.innerHTML=`<div class="field" style="color:var(--err);font-weight:bold;">⚠ 注销账户（不可撤销）</div>
+    <p class="muted" style="margin-bottom:12px;">注销后中心账户状态改为「已注销」，账本只读保留供审计，不可再登录；本机记录与密钥将被删除。</p>
+    <div class="field"><label>输入钱包口令以确认注销</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
+    $('modal-wrap').classList.remove('hidden');
+    ok.onclick=async()=>{ const r=await api('/api/delete-account',{password:$('f-pass').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); view='balance'; } else err.textContent=r.message; }; cancel.onclick=closeModal; return; }
+  if(kind==='setserver'){ title.textContent='设置中心地址'; body.innerHTML=`<div class="field"><label>中心地址</label><input id="f-url" placeholder="https://acsystem.maxshin.top" value="${esc(data.url||'')}"></div>`; $('modal-wrap').classList.remove('hidden'); ok.onclick=async()=>{ const r=await api('/api/set-server',{url:$('f-url').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent=r.message; }; cancel.onclick=closeModal; return; }
+}
+function closeModal(){ $('modal-wrap').classList.add('hidden'); }
+function pendingAction(i, act){
+  const it=pendingList[i]; if(!it) return;
+  const title=$('modal-title'), body=$('modal-body'), err=$('modal-error'); const ok=$('modal-ok'), cancel=$('modal-cancel');
+  const isReject=act==='reject'; title.textContent=isReject?'拒收交易':'确认收款'; err.textContent='';
+  body.innerHTML=`<p class="muted" style="margin-bottom:12px;">${esc(it.sender)} → 我 · ${esc(it.tx_type)} · <b>${fmt(it.amount)} A€</b>（${fmtTs(it.timestamp)}）</p>
+    ${isReject?`<div class="field"><label>拒收原因（可选）</label><input id="f-reason" placeholder="说明拒收原因"></div>`:''}<div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
+  ok.textContent=isReject?'确认拒收':'确认接收'; ok.classList.remove('hidden');
+  ok.onclick=async()=>{ const pass=$('f-pass').value; if(pass.length<8){ err.textContent='口令至少 8 位'; return; } const payload={tx_id:it.tx_id,password:pass}; if(isReject) payload.reason=($('f-reason').value||'').trim();
+    const r=await api(isReject?'/api/reject':'/api/confirm',payload); if(r.ok){ closeModal(); toast(r.message); await refresh(); loadInbox(); } else err.textContent=r.message; };
+  cancel.onclick=closeModal;
+}
+
+// ---------- 顶部 / 自动 ----------
+$('btn-sync').onclick=()=>doSync(true);
+async function quitApp(){ try{ await invoke('quit'); }catch(e){} document.body.innerHTML='<div style="padding:40px;text-align:center;color:#68707d">已退出。</div>'; }
+let autoTimer=null, checkedUpdOnce=false;
+async function doSync(showToast){
+  try{ const r=await api('/api/sync',null); if(showToast) toast(r.message||'刷新完成', !r.ok); }catch(e){ if(showToast) toast('刷新失败：'+(e||''), true); }
+  await refresh();
+}
+function ensureAutoSync(){
+  if(state.logged_in){ if(!autoTimer){ autoTimer=setInterval(()=>{ if(state.logged_in) doSync(false); },180000); doSync(false); if(!checkedUpdOnce){ checkedUpdOnce=true; setTimeout(()=>checkUpdate(false),3000); } } }
+  else if(autoTimer){ clearInterval(autoTimer); autoTimer=null; }
+}
+async function checkUpdate(manual){
+  try{ const info=await invoke('check_update'); if(!info||info.ok===false){ if(manual) toast('检查更新失败',true); return; } if(!info.update_available){ if(manual) toast('当前已是最新版本 v'+info.current); return; } promptUpdate(info); }
+  catch(e){ if(manual) toast('检查更新失败：'+(e||''), true); }
+}
+function maybeBootUpdate(){ if(checkedUpdOnce) return; checkedUpdOnce=true; setTimeout(()=>checkUpdate(false),1200); }
+function promptUpdate(info){
+  const title=$('modal-title'), body=$('modal-body'), err=$('modal-error'); const ok=$('modal-ok'), cancel=$('modal-cancel');
+  err.textContent=''; ok.classList.remove('hidden'); ok.textContent='立即下载'; title.textContent='发现新版本';
+  const srcLabel=info.source==='github'?'GitHub 官方源':'中心服务器';
+  body.innerHTML=`<div class="field" style="font-weight:bold;">A€ 钱包 v${esc(info.latest)} 已发布</div>
+    <p class="muted">当前版本：v${esc(info.current)}<br>下载来源：${srcLabel}</p>${info.notes?`<div class="muted" style="margin-top:8px;">更新说明：<br>${esc(info.notes)}</div>`:''}
+    <div class="upd-dl"><span class="muted" id="upd-status"></span></div>`;
+  $('modal-wrap').classList.remove('hidden');
+  ok.onclick=async()=>{ ok.disabled=true; $('upd-status').textContent='正在下载（来源 '+srcLabel+'），请稍候…';
+    try{ const dl=await invoke('download_update',{source:info.source,version:info.latest}); $('upd-status').textContent='下载完成：'+(dl.filename||'')+'（'+Math.round((dl.bytes||0)/1048576)+' MB）'; ok.disabled=false; ok.textContent='打开所在文件夹';
+      ok.onclick=()=>{ invoke('reveal',{path:dl.path}).catch(()=>{}); toast('已定位安装包，请关闭钱包后双击安装'); closeModal(); };
+    }catch(e){ $('upd-status').textContent='下载失败：'+(e||''); ok.disabled=false; ok.textContent='重试'; } };
+  cancel.onclick=closeModal;
+}
+
+async function refresh(){
+  state=await api('/api/state');
+  renderAuth();
+  if(!state.logged_in) renderAuth();
+  ensureAutoSync();
+  if(state.logged_in && view==='inbox') loadInbox();
+}
+
+// ---------- 启动 ----------
+$('doc-close').onclick=closeDoc;
+applyPreset();
+refresh().then(()=>maybeBootUpdate());
+</script>
+</body>
+</html>

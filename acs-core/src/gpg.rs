@@ -216,17 +216,25 @@ impl GpgUtil {
         let homedir = dir.join("homedir");
         fs::create_dir_all(&homedir)?;
 
+        // 去掉首尾空白，避免 armored 块因换行/空格解析失败
+        let pubkey_trimmed = pubkey_armored.trim();
+        let sig_trimmed = sig_armored.trim();
+        if pubkey_trimmed.is_empty() || sig_trimmed.is_empty() {
+            let _ = fs::remove_dir_all(&dir);
+            return Ok(false);
+        }
+
         self.run_homedir(
             &homedir,
             &["--import"],
             None,
-            Some(pubkey_armored.as_bytes()),
+            Some(pubkey_trimmed.as_bytes()),
         )?;
 
         let data_path = dir.join("data.bin");
         let sig_path = dir.join("sig.asc");
         fs::write(&data_path, data)?;
-        fs::write(&sig_path, sig_armored)?;
+        fs::write(&sig_path, sig_trimmed)?;
 
         let r = self.run_homedir(
             &homedir,

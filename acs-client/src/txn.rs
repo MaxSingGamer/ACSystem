@@ -1,5 +1,5 @@
 //! 交易构建与签名：本地构造 Transfer，用钱包密钥对交易哈希做 detached 签名，
-//! 写入 outbox 待提交（后续由中心端点接收并进入双方确认流程）。
+//! 随后直接提交中心（v3.0.0：签名后即发送，无 outbox/二次确认流程）。
 
 use anyhow::{anyhow, Result};
 use rusqlite::params;
@@ -7,9 +7,10 @@ use rusqlite::params;
 use acs_core::models::{AccountType, Transaction, TransactionStatus, TransactionType};
 use acs_core::transaction;
 
+use crate::client_api;
 use crate::wallet::Wallet;
 
-/// 构建并签名一笔转账（本地 outbox）。
+/// 构建并签名一笔转账（本地 outbox，已弃用二次确认）。
 /// 返回 (tx_id, tx_hash)。
 pub fn build_and_sign_transfer(
     w: &Wallet,
@@ -89,15 +90,31 @@ pub fn build_and_sign_transfer(
     Ok((tx.tx_id.clone(), tx.tx_hash.clone()))
 }
 
-/// 列出本地交易历史（本地账本，含我方相关的交易）。
-pub fn list_local_tx(w: &Wallet, limit: usize) -> Vec<(String, String, String, String, i64, i64, String)> {
+/// 构建并签名一笔转账，签名验证通过后**直接提交中心**（v3.0.0：无 outbox 二次确认）。
+/// 返回中心响应。
+pub fn build_and_submit_transfer(
+    w: &Wallet,
+    receiver: &str,
+    receiver_type: AccountType,
+    amount: i64,
+    passphrase: &str,
+) -> Result<serde_json::Value> {
+    let (tx_id, _tx_hash) = build_and_sign_transfer(w, receiver, receiver_type, amount, passphrase)?;
+    client_api::submit_signed_tx(w, &tx_id)
+}
+
+/// 列出本地交易历史（本地账本，仅与本账户相关）。方向：+1 收 / -1 支 / 0 未知。
+pub fn list_local_tx(
+    w: &Wallet,
+    limit: usize,
+) -> Vec<(String, String, String, String, i64, i64, String, i64)> {
     let uid = w.info.uid.clone();
     let mut stmt = w
         .conn
         .prepare(
-            "SELECT tx_id, tx_type, peer, peer_type, amount, ts, status \
+            "SELECT tx_id, tx_type, peer, peer_type, amount, ts, status, direction \
              FROM local_ledger \
-             WHERE peer=?1 OR peer=?1 \
+             WHERE sender=?1 OR receiver=?1 OR peer=?1 \
              ORDER BY ts DESC LIMIT ?2",
         )
         .unwrap();
@@ -111,6 +128,7 @@ pub fn list_local_tx(w: &Wallet, limit: usize) -> Vec<(String, String, String, S
                 r.get::<_, i64>(4)?,
                 r.get::<_, i64>(5)?,
                 r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)?,
             ))
         })
         .unwrap();

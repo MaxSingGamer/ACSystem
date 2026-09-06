@@ -1,8 +1,8 @@
 # A€ — Alpha Coin 中心化数字货币结算系统
 
 > **ACSystem**：为 Minecraft 服务器组织 **AEU（Alpha Economy Union）** 提供可审计、可签名的 A€ 结算基础设施。
-> Rust workspace，四个 crate：核心库 / 中心服务器 / 钱包客户端 / 只读镜像。
-> 当前版本 **v2.1.0**。
+> Rust workspace，三个 crate：核心库 / 中心服务器 / 桌面钱包客户端（acs-mirror 只读镜像已于 v3.0.0 取消）。
+> 当前版本 **v3.0.0**。
 
 ---
 
@@ -10,40 +10,45 @@
 
 - **中心化结算**：发行权收归理事会，中心密钥由理事长口令 AES-GCM 加密保管。
 - **防双花**：SQLite（WAL）+ `BEGIN IMMEDIATE` 事务，每账户哈希链（`last_tx_hash`）环环相扣。
-- **防假币**：每笔交易由发送方 **ed25519 签名** + 中心签名，双方确认（`tx_confirmations`）后才入账。
-- **多账户登录**：一个钱包可登录多个账户互不干扰；登录界面直接输入 UID+密码（本地记录不在界面展示），本地有加密私钥缓存直接解锁，否则自动向中心取回（跨设备恢复）。
+- **防假币**：每笔交易由发送方 **ed25519 签名** + 中心签名；接收方在「待收箱」确认或拒收后入账。
+- **交易即发**：客户端验证口令并签名后**直接提交中心**，无二次确认流程；拒收（Rejected）/ 错误（Error）交易不计入余额。
+- **桌面客户端（Tauri 2）**：现代银行风格桌面应用，深色侧边栏多级菜单（交易 / 账单 / 个人 / 设置）与功能页隔离；多套预设主题（经典蓝 / 翡翠绿 / 酒红 / 曜黑 / 深蓝），支持明暗观感。
+- **协议与隐私同意**：登录 / 注册须先勾选同意《使用协议》与《隐私政策》（个人与企业使用协议不同）；未勾选前端直接拦截、不发请求，服务端亦校验并记录同意标识与上次登录时间。
+- **多账户登录**：登录界面不展示本地历史记录，直接输入 UID+密码即可；本地有加密私钥缓存则直接解锁，否则自动向中心取回（跨设备恢复）。
 - **密钥体系**：GnuPG（`gpg.exe`，ed25519）签发身份；账户公钥上链，私钥始终由你的口令加密——加密副本存中心可跨设备恢复，口令不落盘、不传明文。
-- **Web GUI 客户端**：启动本地 Web 服务并自动打开浏览器，全中文鼠标操作（登录/注册/菜单/表单）；关闭网页自动退出进程。
-- **弹窗式状态提醒**：同步/转账/提交等结果以居中弹窗展示，自动换行。
-- **成员国家/企业认定**：管理员在后台认定 AEU 成员国家/企业，客户端注册 Country/Company 账户只能从下拉列表选择已认定成员（服务端二次校验）。
-- **注销账户（双重）**：中心将账户状态改为 `Deleted`（账户与账本只读保留供审计，不可再登录）+ 本地删除记录与密钥；危险操作有明确提示。
-- **双端口隔离**：公开 API（client/mirror）与管理后台（网页 + 管理 API）分开监听，后台默认仅本机可达。
-- **社区化同步**：client/mirror 免 apikey，自动测速选择最快镜像源。
-- **一键安装**：client / server 安装包内嵌 `gpg4win-5.1.0.exe`，装完自动启动安装向导由用户手动安装（默认路径 Program Files\GnuPG），无需联网下载。
-- **只读镜像**：`acs-mirror` 增量同步中心账本，提供只读 HTTP 查询，不承载任何写操作。
-- **HTTPS 就绪**：经内网穿透（如 frp）暴露公网，由穿透服务商提供 AutoTLS 证书；也可 TCP 透传 + 本地证书实现端到端加密，客户端使用系统信任链校验（不跳过）。
-- **安全加固**：请求体限 4MB、超时 30s、隐藏 Server 头、安全响应头（CSP/X-Frame-Options/nosniff/no-store）、管理操作审计留痕、源码无硬编码密钥。
+- **自动更新**：客户端启动自动检查更新（GitHub Releases 优先，不可达 / 下载慢自动切中心服务器下载）；服务器端以清单白名单 + sha256 + IP 限速防恶意下载。
+- **自动同步 + 手动刷新**：登录后立即自动同步账本，之后每 3 分钟一次；顶栏与各页提供手动「刷新」按钮。
+- **账单视图**：流水图（累计余额走势）与月度 · 总账（按月份折叠，无交易月份不显示，月内按日期再折叠），展示收 / 支 / 净额。
+- **详细运行日志**：每次启动新建 `{启动时间}.alphalog`，统一「时间 - [类型] 内容」，记录全操作 / 调用 / 通讯 / 输出 / 错误 / 输入；口令、密钥、用户目录名自动打码。
+- **成员国家/企业认定**：管理员在后台认定 AEU 成员，客户端注册 Country / Company 只能从已认定列表选择（服务端二次校验）。
+- **注销账户（双重）**：中心将状态改为 `Deleted`（账户与账本只读保留供审计、不可再登录）+ 本地删除记录与密钥。
+- **双端口隔离**：公开 API（client）与网页管理后台分开监听，后台默认仅本机可达。
+- **一键安装**：安装包内嵌 `gpg4win-5.1.0.exe`，装完自动启动 GnuPG 安装向导（默认 Program Files\GnuPG）。
+- **HTTPS 就绪**：经内网穿透（如 frp）暴露公网，由穿透服务商 AutoTLS 提供证书；客户端走系统信任链校验。
+- **安全加固**：请求体限 4MB、超时 30s、隐藏 Server 头、安全响应头（CSP / X-Frame-Options / nosniff / no-store）、请求级日志、管理操作审计留痕、源码无硬编码密钥。
+- **修复工具**：`acs-server repair <db> [--apply]` 以独立 EXE 清理拒收 / 错误 / 异常金额等脏数据（服务器无需 sqlite3 / python 环境）。
 
 ---
 
 ## 二、架构
 
 ```
-公网客户端 (Web 钱包 / 镜像) ──https──► 穿透服务商边缘 :443 (AutoTLS 终止)
-                                              │ 内网穿透隧道（frp 等，自行部署）
-                                              ▼
-                                      acs-server 公开 API  :9600 (0.0.0.0)
-                                        /api/client/*   /api/mirror/*   /api/status
-                                              ▲
-                                      (ed25519 签名校验 · 同步免 apikey)
-内网管理员 (浏览器) ───────────────────────►  acs-server 管理后台 :9680 (127.0.0.1)
-                                              /login /root /finance + /api/admin/*
+桌面 / 钱包客户端 (Tauri 2) ──https──► 穿透服务商边缘 :443 (AutoTLS 终止)
+                                             │ 内网穿透隧道（frp 等，自行部署）
+                                             ▼
+                                     acs-server 公开 API  :9600 (0.0.0.0)
+                                       /api/client/*   /api/sync   /api/legal/*
+                                       /api/client/update/*   /api/status
+                                             ▲
+                                     (ed25519 签名校验 · 同步免 apikey)
+内网管理员 (浏览器) ──────────────────────►  acs-server 管理后台 :9680 (127.0.0.1)
+                                             /login /root /finance + /api/admin/*
 ```
 
 | 服务 | 默认端口 | 绑定 | 暴露内容 |
 |---|---|---|---|
-| **公开 API** | **9600** | `0.0.0.0` | 仅 client / mirror：`/api/client/*`、`/api/mirror/*`、`/api/status`（同步免 apikey，无网页、无管理） |
-| **后台管理** | **9680** | `127.0.0.1`（仅本机） | 网页后台 + 管理 API `/api/admin/*`、`/api/accounts`、`/api/stats`、`/api/audit`、`/api/members`、`/api/admin/mirror-keys` |
+| **公开 API** | **9600** | `0.0.0.0` | 仅 client：`/api/client/*`、`/api/sync`、`/api/legal/{doc}`、`/api/client/update/*`、`/api/status`（同步免 apikey，无网页、无管理） |
+| **后台管理** | **9680** | `127.0.0.1`（仅本机） | 网页后台 + 管理 API `/api/admin/*`、`/api/accounts`、`/api/stats`、`/api/audit`、`/api/members` |
 
 > 对外只暴露 **9600**（经内网穿透）；9680 管理端**不开放公网**，管理员在本机访问，或经 SSH/RDP 隧道访问。
 
@@ -55,15 +60,14 @@
 |---|---|---|
 | **acs-core** | 核心库 | 数据模型 / SQLite / 账户 / 交易 / GnuPG / 配置 / 错误；产出 `rlib` + `cdylib`(dll) |
 | **acs-server** | 中心服务器 | axum 0.8，双端口：公开 API + 网页管理后台 |
-| **acs-client** | 钱包客户端 | 本地 Web GUI（自动开浏览器 + 全中文鼠标操作）+ CLI 子命令；多账户与私钥于 `~/.alpha_dir/acs-client` |
-| **acs-mirror** | 只读镜像 | 增量同步 + 只读 HTTP 查询（默认 9090） |
+| **acs-client** | 桌面钱包 | Tauri 2 桌面应用（现代银行风格多级菜单 + 主题）+ CLI 子命令；多账户、账本与日志于 `~/.alpha_dir/acs-client` |
 
 ### 信任模型
 
 ```
-中心 > 本地 > 镜像
+中心 > 本地
 ```
-中心权威结算；客户端本地保存多账户与交易记录；镜像只读缓存，供只读查询。
+中心权威结算；客户端本地保存账户、账本与日志，直接从中心同步（无镜像中间层）。
 
 > **私钥安全**：私钥由你的钱包口令加密（口令校验用 `$salt$sha256`）后才上链/存中心，中心与网络均只见密文；
 > 登录取回时服务端只校验口令哈希，解密与导入全程在本地完成，口令不落盘、不传明文。
@@ -89,52 +93,50 @@ cargo build --release
 ```powershell
 cargo run -p acs-server
 # 日志：
-#   [acs-server] 公开 API（client/mirror）: http://0.0.0.0:9600
+#   [acs-server] 公开 API（client）: http://0.0.0.0:9600
 #   [acs-server] 后台管理（仅内网）: http://127.0.0.1:9680
 ```
 
 首次启动会：迁移旧库 → 按密码策略种子管理员 / 系统账户（见下）。
 
-> **密码策略（v2.1.0）**
-> - **无 `~/.alpha_dir/.env`**：创建默认 `admin`（root 角色），随机密码输出到 `~/.alpha_dir/acs-server/SYSTEM_LOGIN_PASSWORDS.txt`；**不创建系统账户**。
-> - **有 `~/.alpha_dir/.env`**：自动**禁用默认 admin**；管理员按 `ACS_ADMIN_ACCOUNTS`（`uid:role:密码`）、系统账户按 `ACS_SYSTEM_ACCOUNTS`（`uid:密码`）创建；密码**只存哈希**、不输出明文。格式参考仓库根 `.env.example`。
+> **密码策略**
+> - **无 `~/.alpha_dir/acs-server/.env`**：创建默认 `admin`（root 角色），随机密码输出到 `~/.alpha_dir/acs-server/SYSTEM_LOGIN_PASSWORDS.txt`；**不创建系统账户**。
+> - **有 `~/.alpha_dir/acs-server/.env`**：自动**禁用默认 admin**；管理员按 `ACS_ADMIN_ACCOUNTS`（`uid:role:密码`）、系统账户按 `ACS_SYSTEM_ACCOUNTS`（`uid:密码`）创建；密码**只存哈希**、不输出明文。格式参考仓库根 `.env.example`。
 
-### 3. 客户端（Alpha Wallet · Web GUI）
+### 3. 客户端（Alpha Wallet · 桌面版）
 
 ```powershell
-# 启动 Web 钱包：自动打开浏览器（关闭网页自动退出）
+# 启动桌面钱包（Tauri 2，无需浏览器）
 acs-client
-# 首次打开：① 配置中心服务器（留空默认 https://acsystem.maxshin.top）→ ② 登录/注册
+# 首次：① 配置中心服务器（留空默认 https://acsystem.maxshin.top）→ ② 登录/注册（须勾选同意《使用协议》与《隐私政策》）
 ```
 
-**首次使用**：网页内第一步配置中心服务器；第二步登录（输入 UID+密码）或注册新账户（个人直接填 UID；国家/企业从已认定下拉列表选择）。
+**多级菜单**：交易（转账 / 待收箱）、账单（流水图 / 月度 · 总账）、个人（账户信息 / 余额 / 退出登录 / 注销账户）、设置（界面个性化 / 中心地址 / 使用教程 / 用户协议 / 隐私政策 / 开源协议 / 检查更新 / 关于软件）。登录后自动同步（每 3 分钟一次），启动时自动检查更新；个人与企业账户的《使用协议》不同，登录 / 注册前须阅读并勾选同意。
 
 **CLI 子命令**（脚本/调试用）：
 ```powershell
 acs-client new --uid Steve --email Steve@aeu.org --pass 'xxx' --server http://127.0.0.1:9600
-acs-client status / sync / open / send / submit / confirm
+acs-client status / sync / open / send / confirm / config
 ```
 
 ### 4. 管理后台（成员认定 / 审计）
 
-根管理员（9680）登录后：
+根管理员（9680）登录后（支持明/暗主题切换）：
 - **账户** → 查询/冻结账户、管理后台管理员、**AEU 成员国家 / 企业认定**（双列面板，添加/撤销/删除）
 - **安全** → 铸造（发行）、根密钥解锁/导出
-- **镜像** → 镜像源 apikey、社区镜像登记
 - **审计** → 管理日志、交易总账单（密码解锁）
 
 金融部（finance）登录后：状态 / 企业账户（银行） / **成员企业认定** / 审计。
 
-### 5. 镜像
+### 5. 修复工具与更新清单
 
+**修复工具**（独立 EXE，服务器无需 sqlite3 / python）：
 ```powershell
-acs-mirror config --server http://127.0.0.1:9600
-acs-mirror sync                    # 拉取增量账本与账户快照
-acs-mirror status                  # 同步状态
-acs-mirror serve --port 9090       # 只读 HTTP 查询服务
+acs-server repair <数据库路径>          # 预览：列出拒收/错误/异常金额等脏数据
+acs-server repair <数据库路径> --apply  # 执行：事务内删除脏数据并写入 .alphalog
 ```
 
-> 镜像源社区化：同步免 apikey，客户端启动时自动测速选择最快镜像源。
+**客户端更新清单**：服务器在 `~/.alpha_dir/acs-server/updates/` 放置 `update.json` + 对应 `acs-client-{版本}-windows-x64-setup.exe`（格式参考仓库根 `acs-server/updates.example.json`）；客户端启动自动检查（GitHub 优先，不可达/慢则走服务器下载）。
 
 ### 6. 运行测试
 
@@ -171,16 +173,15 @@ cargo test -p acs-core
 | TCP 透传 + 本地证书 | 你的 acs-server | 不能（端到端加密） | `deploy/certs/generate.ps1` 自签，或 acme.sh/certbot |
 
 > 即使走服务商 AutoTLS，交易安全性仍由应用层 **ed25519 签名 + 哈希链** 兜底，不依赖传输保密；
-> 同步已社区化免 apikey，无需额外凭据。
+> 同步接口免 apikey，无需额外凭据。
 
 ### 3. 客户端配置
 
 ```powershell
 acs-client config --server https://acs.aeu.org
-acs-mirror config --server https://acs.aeu.org
 ```
 
-若走 **TCP 透传 + 本地自签证书**，需把证书导入系统根（client/mirror 用 Windows schannel 校验链）：
+若走 **TCP 透传 + 本地自签证书**，需把证书导入系统根（客户端用 Windows schannel 校验链）：
 
 ```powershell
 certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
@@ -192,8 +193,8 @@ certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
 
 ## 六、安全模型
 
-- **管理端隔离**：9680 默认绑定 `127.0.0.1`，公网不可达；对外只暴露 9600 的 client/mirror 端点。
-- **穿透信任边界**：若用服务商托管 HTTPS（AutoTLS），穿透服务商处于 TLS 终止点、能看到交易明文；如需端到端保密，用 TCP 透传 + 本地证书（隧道只搬运加密字节）。同步接口已社区化免 apikey。
+- **管理端隔离**：9680 默认绑定 `127.0.0.1`，公网不可达；对外只暴露 9600 的 client 端点。
+- **穿透信任边界**：若用服务商托管 HTTPS（AutoTLS），穿透服务商处于 TLS 终止点、能看到交易明文；如需端到端保密，用 TCP 透传 + 本地证书（隧道只搬运加密字节）。同步接口免 apikey。
 - **私钥托管**：中心只存口令加密的私钥副本与口令哈希（`$salt$sha256`）；口令不明文存储、不传输，登录取回仅返回密文私钥，解密导入在本地完成。
 - **交易签名链**：发送方 ed25519 签名 → 中心验签并加签 → 接收方确认 → 写入双方哈希链。
 - **发行权**：收归理事会；中心密钥由理事长口令 AES-GCM 加密保管，`gpg.exe`（ed25519）签发身份。
@@ -210,10 +211,9 @@ certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
 | `ACS_PUBLIC_BIND` | `0.0.0.0` | 公开 API 监听地址 |
 | `ACS_ADMIN_PORT` | `9680` | 后台管理端口 |
 | `ACS_ADMIN_BIND` | `127.0.0.1` | 后台管理监听地址（保持本机即不开放公网） |
-| `ACS_ALPHA_DIR` | `~/.alpha_dir` | 客户端钱包目录 |
-| `ACS_MIRROR_DIR` | `~/.alpha_mirror` | 镜像数据目录 |
 
-> 管理员 / 系统账户的初始密码通过 `~/.alpha_dir/.env` 定义（见「快速开始」密码策略）；登录后请立即修改。
+> 客户端数据目录固定为 `~/.alpha_dir/acs-client`（数据库 / gpg / 运行日志，每次启动新建 `{启动时间}.alphalog`）。
+> 管理员 / 系统账户的初始密码通过 `~/.alpha_dir/acs-server/.env` 定义（见「快速开始」密码策略）；登录后请立即修改。
 
 ---
 
@@ -224,7 +224,9 @@ certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
 | 同步失败/连不上中心 | 先本地 `http://127.0.0.1:9600` 验证服务；再查 frp 进程/Token/域名解析 |
 | 管理后台公网访问不到 | 正常：9680 仅本机；远程管理请用 SSH/RDP 隧道 |
 | 浏览器提示"不安全" | 自签名证书未信任：`certutil -addstore -f Root cert.pem` 或换正式证书 |
-| client/mirror 连不上穿透域名 | 先本地 `http://127.0.0.1:9600` 验证服务正常；再查 frp 进程/Token/域名解析 |
+| 登录/注册提示“请先同意协议” | 需在登录/注册页勾选同意《使用协议》（个人/企业版不同）与《隐私政策》后才可提交 |
+| client 连不上穿透域名 | 先本地 `http://127.0.0.1:9600` 验证服务正常；再查 frp 进程/Token/域名解析 |
+| 登录后账本一直“尚未刷新” | 可能中心不可达或未登录；点顶栏「刷新」，并查 `.alphalog` 日志定位 |
 | 装完没弹 Gpg4win 向导 / 提示缺 gpg | 已装则跳过；未装则从 `{app}\tools\gpg4win-5.1.0.exe` 手动运行安装（勾选 GnuPG 核心 + Kleopatra） |
 | 注册 Country/Company 提示"未认定" | 需根管理员/金融部先在后台「成员认定」添加该国家/企业 |
 | 注销账户后无法登录 | 正常：已注销账户状态为 `Deleted`，中心保留账本供审计，不可再登录 |
@@ -236,14 +238,12 @@ certutil -addstore -f Root deploy/certs/cert.pem   # 需管理员
 
 ```
 ACSystem/
-├── Cargo.toml              # workspace（acs-core/server/client/mirror）
-├── acs-core/               # 核心库（rlib + cdylib）
-├── acs-server/             # 中心服务器（双端口 axum + 网页管理后台）
-├── acs-client/             # Web GUI 钱包（内嵌网页 + 多账户登录）/ CLI
-├── acs-mirror/             # 只读镜像
+├── Cargo.toml              # workspace（acs-core / acs-server / acs-client）
+├── acs-core/               # 核心库（rlib + cdylib）：模型/SQLite/账户/交易/GPG/协议/日志
+├── acs-server/             # 中心服务器（axum 双端口 + 网页管理后台 + 更新清单/修复工具）
+├── acs-client/             # Tauri 2 桌面钱包（多级菜单 + 主题）/ CLI；前端资源内嵌于 exe
 ├── deploy/
-│   ├── certs/generate.ps1  # 本地证书生成（TCP 透传端到端加密时用）
-│   └── nginx/nginx-acs.conf# 可选：nginx 反代旧方案（非必须）
+│   └── certs/generate.ps1  # 本地证书生成（TCP 透传端到端加密时用）
 ├── packaging/              # 安装包脚本（.iss + Gpg4win 安装器；本地保留，不入库）
 └── .gitignore              # 敏感文件一律不提交
 ```

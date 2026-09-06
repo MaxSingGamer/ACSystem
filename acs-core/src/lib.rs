@@ -11,6 +11,8 @@ pub mod errors;
 pub mod ffi;
 pub mod gpg;
 pub mod gpg_detect;
+pub mod legal;
+pub mod log;
 pub mod models;
 pub mod transaction;
 

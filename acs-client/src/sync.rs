@@ -1,6 +1,6 @@
-//! 中心镜像同步：向中心请求镜像列表，自动测速选最快端点拉取增量交易与账户快照，写入本地。
+//! 中心同步：直接从中心服务器拉取增量交易与账户快照，写入本地。
 //!
-//! 信任模型：中心 > 本地 > 镜像。镜像快照带 sha256 哈希，若本地存有中心公钥可校验签名。
+//! 信任模型：中心为唯一记账权威。快照带 sha256 哈希，若本地存有中心公钥可校验签名。
 
 use std::sync::{Arc, OnceLock};
 
@@ -23,10 +23,10 @@ pub fn shared_agent() -> &'static ureq::Agent {
     })
 }
 
-/// 同步结果（自动选择最快镜像/中心）。
+/// 同步结果。
 #[derive(Debug, Default)]
 pub struct SyncResult {
-    /// 实际使用的数据源（中心或镜像地址）。
+    /// 实际使用的数据源（中心地址）。
     pub source: String,
     pub server_time: i64,
     pub txs: usize,
@@ -35,69 +35,24 @@ pub struct SyncResult {
     pub central_sig: Option<String>,
 }
 
-/// 同步：向中心请求可用镜像列表，自动 ping 各候选（中心+镜像）延迟，选最快端点拉增量。
-/// since 取本地已知的最大交易时间戳。client 免 apikey（镜像拉取服务才需要 apikey）。
+/// 同步：直接从中心服务器拉取增量（v3.0.0 取消镜像，不再发现多个端点）。
+/// since 取本地已知的最大交易时间戳。client 免 apikey。
 pub fn pull(w: &Wallet) -> Result<SyncResult> {
     let server = w.info.server_url.trim().trim_end_matches('/');
     if server.is_empty() {
         return Err(anyhow!("尚未配置中心服务器地址（请在设置中填写 server_url）"));
     }
 
-    // 1) 候选端点：中心自身 + 社区镜像列表
-    let mut candidates: Vec<String> = vec![server.to_string()];
-    if let Ok(resp) = shared_agent().get(&format!("{server}/api/mirror/list"))
-        .timeout(std::time::Duration::from_secs(5))
-        .call()
-    {
-        if let Ok(j) = resp.into_json::<serde_json::Value>() {
-            if let Some(arr) = j.get("mirrors").and_then(|v| v.as_array()) {
-                for m in arr {
-                    if let Some(u) = m.get("url").and_then(|v| v.as_str()) {
-                        let u = u.trim().trim_end_matches('/');
-                        if !u.is_empty() && !candidates.contains(&u.to_string()) {
-                            candidates.push(u.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 2) ping 各候选 /api/status，选延迟最低者；记录失败原因便于诊断
-    let mut best: Option<(String, std::time::Duration)> = None;
-    let mut failures: Vec<String> = Vec::new();
-    for base in &candidates {
-        let t0 = std::time::Instant::now();
-        match shared_agent().get(&format!("{base}/api/status"))
-            .timeout(std::time::Duration::from_secs(8))
-            .call()
-        {
-            Ok(_) => {
-                let dt = t0.elapsed();
-                if best.as_ref().map_or(true, |(_, d)| dt < *d) {
-                    best = Some((base.clone(), dt));
-                }
-            }
-            Err(e) => failures.push(format!("{base} → {e}")),
-        }
-    }
-    let (chosen, _lat) = best.ok_or_else(|| {
-        anyhow!(
-            "无法连接任何候选端点（共 {}）：{}. 请检查中心地址/证书/网络。",
-            candidates.len(),
-            failures.join("；")
-        )
-    })?;
-
-    // 3) 从最快端点拉增量（GET /api/sync?since=X）
+    // 1) 中心直接拉增量（GET /api/sync?since=X）
     let since: i64 = w
         .conn
         .query_row("SELECT COALESCE(MAX(ts),0) FROM local_ledger", [], |r| r.get(0))
         .unwrap_or(0);
-    let resp = shared_agent().get(&format!("{chosen}/api/sync?since={since}"))
+    acs_core::log::net(&format!("GET {server}/api/sync?since={since}"));
+    let resp = shared_agent().get(&format!("{server}/api/sync?since={since}"))
         .timeout(std::time::Duration::from_secs(15))
         .call()
-        .map_err(|e| anyhow!("连接 {chosen} 失败：{e}"))?;
+        .map_err(|e| anyhow!("连接中心失败：{e}"))?;
     let j: serde_json::Value = resp
         .into_json()
         .map_err(|e| anyhow!("响应解析失败：{e}"))?;
@@ -118,27 +73,38 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
     // 可选：校验中心签名（本地有中心公钥时）
     // TODO: 若 known_pubkeys 存有中心公钥，用 gpg.verify_detached 校验 hash 签名。
 
-    // 合并交易到 local_ledger
+    // 合并交易到 local_ledger（仅与本账户相关的交易；direction: +1 收 / -1 支 / 0 未知）
+    let our = w.info.uid.as_str();
     let mut txs = 0usize;
     if let Some(arr) = data.get("transactions").and_then(|v| v.as_array()) {
         for t in arr {
             let tx_id = t.get("tx_id").and_then(|v| v.as_str()).unwrap_or_default();
             let tx_type = t.get("tx_type").and_then(|v| v.as_str()).unwrap_or_default();
-            // 兼容中心（sender/sender_type）与镜像（peer/peer_type）字段
-            let sender = t.get("peer").or_else(|| t.get("sender")).and_then(|v| v.as_str()).unwrap_or_default();
-            let sender_type = t.get("peer_type").or_else(|| t.get("sender_type")).and_then(|v| v.as_str()).unwrap_or_default();
+            let sender = t.get("sender").and_then(|v| v.as_str()).unwrap_or_default();
+            let sender_type = t.get("sender_type").and_then(|v| v.as_str()).unwrap_or_default();
+            let receiver = t.get("receiver").and_then(|v| v.as_str()).unwrap_or_default();
+            let receiver_type = t.get("receiver_type").and_then(|v| v.as_str()).unwrap_or_default();
             let amount = t.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
             let ts = t.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
             let tx_hash = t.get("tx_hash").and_then(|v| v.as_str()).unwrap_or_default();
             let central_sig = t.get("central_sig").and_then(|v| v.as_str());
             let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("Pending");
 
+            // 仅记录与本账户相关的交易；据此确定方向与对方
+            let (direction, peer, peer_type) = if sender == our {
+                (-1i64, receiver, receiver_type)
+            } else if receiver == our {
+                (1i64, sender, sender_type)
+            } else {
+                continue;
+            };
+
             let n = w.conn.execute(
-                "INSERT OR IGNORE INTO local_ledger(tx_id, tx_type, peer, peer_type, amount, ts, tx_hash, central_sig, status) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                "INSERT OR IGNORE INTO local_ledger(tx_id, tx_type, peer, peer_type, amount, ts, tx_hash, central_sig, status, sender, receiver, direction) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 params![
-                    tx_id, tx_type, sender, sender_type, amount, ts, tx_hash,
-                    central_sig.unwrap_or_default(), status
+                    tx_id, tx_type, peer, peer_type, amount, ts, tx_hash,
+                    central_sig.unwrap_or_default(), status, sender, receiver, direction
                 ],
             )?;
             txs += n;
@@ -175,8 +141,11 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
         .get("server_time")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
+    acs_core::log::out(&format!(
+        "同步完成：新增交易 {txs}、账户快照 {accounts}（源 {server}）"
+    ));
     Ok(SyncResult {
-        source: chosen,
+        source: server.to_string(),
         server_time,
         txs,
         accounts,

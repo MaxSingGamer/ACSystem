@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "A€ 钱包",
+  "version": "3.0.0",
+  "identifier": "top.acsystem.wallet",
+  "build": {
+    "frontendDist": "."
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "A€ 钱包",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 620,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.ico"
+    ]
+  }
+}

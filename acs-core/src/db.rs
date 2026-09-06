@@ -30,10 +30,14 @@ CREATE TABLE IF NOT EXISTS member_companies(
     status TEXT NOT NULL DEFAULT 'Active');
 
 -- 客户端账户登录凭证（密码哈希，用于登录取回加密私钥；客户端注册时写入）
+-- v3.1.0：增加 last_login（上次登录时间）与协议同意标记（agree_terms / agree_privacy）
 CREATE TABLE IF NOT EXISTS account_credentials(
     uid TEXT NOT NULL,
     type TEXT NOT NULL,
     password_hash TEXT NOT NULL,
+    last_login INTEGER NOT NULL DEFAULT 0,
+    agree_terms INTEGER NOT NULL DEFAULT 0,
+    agree_privacy INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(uid, type));
 
 -- 账本账户分表（无 abbr；UID 为唯一识别符）
@@ -82,11 +86,6 @@ CREATE TABLE IF NOT EXISTS email_codes(
     expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
     verified INTEGER NOT NULL DEFAULT 0);
 
--- 镜像 apikey
-CREATE TABLE IF NOT EXISTS mirror_keys(
-    apikey TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Active',
-    last_pull_at INTEGER);
-
 -- 管理审计日志
 CREATE TABLE IF NOT EXISTS audit_log(
     id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, op TEXT NOT NULL,
@@ -103,7 +102,9 @@ pub const LOCAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS local_ledger(
     tx_id TEXT PRIMARY KEY, tx_type TEXT NOT NULL,
     peer TEXT NOT NULL, peer_type TEXT NOT NULL, amount INTEGER NOT NULL,
-    ts INTEGER NOT NULL, tx_hash TEXT NOT NULL, central_sig TEXT, status TEXT NOT NULL);
+    ts INTEGER NOT NULL, tx_hash TEXT NOT NULL, central_sig TEXT, status TEXT NOT NULL,
+    sender TEXT NOT NULL DEFAULT '', receiver TEXT NOT NULL DEFAULT '',
+    direction INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS known_pubkeys(
     uid TEXT NOT NULL, type TEXT NOT NULL, pubkey TEXT NOT NULL, source TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS keys(
@@ -123,6 +124,27 @@ pub fn init_central(conn: &Connection) -> Result<()> {
 /// 初始化客户端（本地）库表。
 pub fn init_local(conn: &Connection) -> Result<()> {
     conn.execute_batch(LOCAL_SCHEMA)?;
+    // 老库补列：sender / receiver / direction（供账单区分收/支）
+    ensure_col(conn, "local_ledger", "sender", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_col(conn, "local_ledger", "receiver", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_col(conn, "local_ledger", "direction", "INTEGER NOT NULL DEFAULT 0")?;
+    Ok(())
+}
+
+/// 若本地表缺列则 ALTER TABLE 补列（SQLite 老库升级）。
+fn ensure_col(conn: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+            rusqlite::params![table, col],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if !exists {
+        let sql = format!("ALTER TABLE {table} ADD COLUMN {col} {decl}");
+        let _ = conn.execute(&sql, []);
+    }
     Ok(())
 }
 
@@ -170,6 +192,25 @@ pub fn migrate_center(conn: &Connection) -> Result<()> {
         if column_exists(conn, t, "abbr") {
             conn.execute(&format!("ALTER TABLE {t} DROP COLUMN abbr"), [])?;
         }
+    }
+    // 凭证表补列（老库升级）：last_login / agree_terms / agree_privacy
+    if column_exists(conn, "account_credentials", "last_login") == false {
+        let _ = conn.execute(
+            "ALTER TABLE account_credentials ADD COLUMN last_login INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+    }
+    if column_exists(conn, "account_credentials", "agree_terms") == false {
+        let _ = conn.execute(
+            "ALTER TABLE account_credentials ADD COLUMN agree_terms INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+    }
+    if column_exists(conn, "account_credentials", "agree_privacy") == false {
+        let _ = conn.execute(
+            "ALTER TABLE account_credentials ADD COLUMN agree_privacy INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
     }
     // 新增确认表
     conn.execute_batch(

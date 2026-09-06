@@ -191,7 +191,7 @@ pub fn confirm_tx(
     let db = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let tx = require_tx(&db, tx_id)?;
     if tx.status != TransactionStatus::Pending {
-        return Err(AcsError::Message("该交易已处理".into()));
+        return Err(AcsError::Message("该交易已处理（不可再修改状态）".into()));
     }
     if tx.receiver != actor_uid || tx.receiver_type != actor_type {
         return Err(AcsError::Unauthorized("仅接收方可确认该交易".into()));
@@ -217,7 +217,7 @@ pub fn reject_tx(
     let db = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let tx = require_tx(&db, tx_id)?;
     if tx.status != TransactionStatus::Pending {
-        return Err(AcsError::Message("该交易已处理".into()));
+        return Err(AcsError::Message("该交易已处理（不可再修改状态）".into()));
     }
     if tx.receiver != actor_uid || tx.receiver_type != actor_type {
         return Err(AcsError::Unauthorized("仅接收方可拒绝该交易".into()));
@@ -232,6 +232,37 @@ pub fn reject_tx(
     )?;
     db.commit()?;
     Ok(())
+}
+
+/// 将交易标记为错误状态（金额不计入余额，此后不可再修改状态）。
+/// 用于结算/校验失败的交易（如签名/链头不一致导致无法推进）。
+pub fn mark_error(
+    conn: &mut Connection,
+    tx_id: &str,
+) -> Result<()> {
+    let db = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = require_tx(&db, tx_id)?;
+    if tx.status != TransactionStatus::Pending {
+        return Err(AcsError::Message("该交易已处理（不可再修改状态）".into()));
+    }
+    db.execute(
+        "UPDATE transactions SET status='Error' WHERE tx_id=?1",
+        params![tx_id],
+    )?;
+    db.execute(
+        "UPDATE tx_confirmations SET confirmed=0, reject_reason='error', confirmed_at=?1 WHERE tx_id=?2",
+        params![chrono::Utc::now().timestamp(), tx_id],
+    )?;
+    db.commit()?;
+    Ok(())
+}
+
+/// 终态（不可再修改状态）：Rejected / Error。
+pub fn is_terminal(status: TransactionStatus) -> bool {
+    matches!(
+        status,
+        TransactionStatus::Rejected | TransactionStatus::Error
+    )
 }
 
 /// 按类型执行账本结算（内部，须在事务内调用）。

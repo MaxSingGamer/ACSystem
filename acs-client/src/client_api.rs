@@ -18,10 +18,13 @@ fn base(w: &Wallet) -> Result<String> {
 }
 
 /// 开立账户：导出钱包公钥，连同密码加密私钥与密码哈希上传到中心（支持多设备登录）。
+/// v3.1.0：须携带已同意《使用协议》/《隐私政策》标识，未同意服务端驳回注册。
 pub fn open_account(
     w: &Wallet,
     encrypted_seckey: &str,
     password_hash: &str,
+    agree_terms: bool,
+    agree_privacy: bool,
 ) -> Result<serde_json::Value> {
     let url = base(w)?;
     let fp = w
@@ -38,46 +41,77 @@ pub fn open_account(
         "pubkey": pubkey,
         "encrypted_seckey": encrypted_seckey,
         "password_hash": password_hash,
+        "agree_terms": agree_terms,
+        "agree_privacy": agree_privacy,
     });
+    acs_core::log::net(&format!("POST {}/api/client/open (uid={}, type={})", url, w.info.uid, w.info.atype.as_str()));
     match shared_agent().post(&format!("{url}/api/client/open"))
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(15))
         .send_json(body)
     {
-        Ok(resp) => Ok(resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?),
+        Ok(resp) => {
+            let v: serde_json::Value =
+                resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?;
+            acs_core::log::out("open 成功");
+            Ok(v)
+        }
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+            let m = anyhow!("中心返回 HTTP {code}: {text}");
+            acs_core::log::err(&m.to_string());
+            Err(m)
         }
-        Err(e) => Err(anyhow!("连接失败：{e}")),
+        Err(e) => {
+            let m = anyhow!("连接失败：{e}");
+            acs_core::log::err(&m.to_string());
+            Err(m)
+        }
     }
 }
 
 /// 登录：向中心请求取回加密私钥（服务端校验密码哈希后返回），供本机导入或跨设备恢复。
 /// atype 为 None 时由中心按 UID 自动匹配账户类型。
+/// v3.1.0：登录请求须携带已同意协议标识；服务端校验，未同意则拒绝。
 pub fn fetch_key(
     w: &Wallet,
     uid: &str,
     atype: Option<AccountType>,
     password: &str,
+    agree_terms: bool,
+    agree_privacy: bool,
 ) -> Result<serde_json::Value> {
     let url = base(w)?;
     let body = json!({
         "uid": uid,
         "type": atype.map(|t| t.as_str().to_string()).unwrap_or_default(),
         "password": password,
+        "agree_terms": agree_terms,
+        "agree_privacy": agree_privacy,
     });
+    acs_core::log::net(&format!("POST {}/api/client/fetch-key (uid={})", url, uid));
     match shared_agent().post(&format!("{url}/api/client/fetch-key"))
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(15))
         .send_json(body)
     {
-        Ok(resp) => Ok(resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?),
+        Ok(resp) => {
+            let v: serde_json::Value =
+                resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?;
+            acs_core::log::out("fetch-key 成功");
+            Ok(v)
+        }
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+            let m = anyhow!("中心返回 HTTP {code}: {text}");
+            acs_core::log::err(&m.to_string());
+            Err(m)
         }
-        Err(e) => Err(anyhow!("连接失败：{e}")),
+        Err(e) => {
+            let m = anyhow!("连接失败：{e}");
+            acs_core::log::err(&m.to_string());
+            Err(m)
+        }
     }
 }
 
@@ -190,6 +224,46 @@ pub fn submit_outbox(w: &Wallet, tx_id: Option<&str>) -> Result<Vec<(String, Str
         }
     }
     Ok(results)
+}
+
+/// 提交一笔已签名的 outbox 交易（v3.0.0：签名后直接调用，无二次确认）。
+/// 从 outbox 读取 tx_json 并 POST /api/client/submit。
+pub fn submit_signed_tx(w: &Wallet, tx_id: &str) -> Result<serde_json::Value> {
+    let url = base(w)?;
+    let tx_json: String = w
+        .conn
+        .query_row(
+            "SELECT tx_json FROM outbox WHERE tx_id=?1",
+            rusqlite::params![tx_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| anyhow!("读取 outbox 交易失败：{e}"))?;
+    let tx: acs_core::models::Transaction = serde_json::from_str(&tx_json)
+        .map_err(|e| anyhow!("outbox 数据损坏: {e}"))?;
+    let body = json!({ "tx": tx });
+    match shared_agent().post(&format!("{url}/api/client/submit"))
+        .set("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send_json(body)
+    {
+        Ok(resp) => {
+            let v: serde_json::Value = resp
+                .into_json()
+                .map_err(|e| anyhow!("响应解析失败：{e}"))?;
+            // 提交成功：标记 Submitted
+            w.conn
+                .execute(
+                    "UPDATE outbox SET state='Submitted' WHERE tx_id=?1",
+                    rusqlite::params![tx_id],
+                )?;
+            Ok(v)
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+        }
+        Err(e) => Err(anyhow!("连接失败：{e}")),
+    }
 }
 
 /// 查询待确认交易（作为接收方）。

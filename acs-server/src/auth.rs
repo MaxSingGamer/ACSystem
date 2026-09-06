@@ -74,6 +74,11 @@ pub async fn login(
         return Err(ApiErr::unauthorized("账号或密码错误"));
     }
     let role = AdminRole::from_str(&role).ok_or_else(|| ApiErr::internal("后台角色配置异常"))?;
+    // 记录管理员上次登录时间
+    let _ = st.db.lock().unwrap().execute(
+        "UPDATE admins SET last_login=?1 WHERE id=?2",
+        rusqlite::params![Utc::now().timestamp(), id],
+    );
 
     let token = uuid::Uuid::new_v4().to_string();
     let expires_at = Utc::now().timestamp() + st.token_ttl_secs;

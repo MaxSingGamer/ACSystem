@@ -12,6 +12,7 @@
     <div class="brand"><span class="logo"></span>Alpha Coin <span class="muted" style="font-weight:400">· 根管理员</span></div>
     <span class="sp"></span>
     <span class="who" id="who"></span>
+    <button class="link-btn" title="明暗主题切换" onclick="toggleTheme()">🌓</button>
     <button class="link-btn" onclick="showChg()">修改密码</button>
     <button class="link-btn" onclick="logout()">退出</button>
   </div>
@@ -22,7 +23,6 @@
     <div class="section-tab on" data-s="ov" onclick="sec('ov')">状态</div>
     <div class="section-tab" data-s="acc" onclick="sec('acc')">账户</div>
     <div class="section-tab" data-s="safe" onclick="sec('safe')">安全</div>
-    <div class="section-tab" data-s="mir" onclick="sec('mir')">镜像</div>
     <div class="section-tab" data-s="aud" onclick="sec('aud')">审计</div>
   </div>
 
@@ -120,31 +120,6 @@
         <button class="btn-secondary btn-sm" onclick="exportKey()">导出到 ./alpha_dir</button>
       </div>
       <div class="muted">解锁后可用本人密钥为铸造签名；导出将私钥（armored）写入服务端 ./alpha_dir。</div>
-    </div>
-  </div>
-
-  <!-- 镜像 -->
-  <div class="section" id="s-mir">
-    <div class="panel">
-      <h2>镜像源（只读）apikey</h2>
-      <div class="row">
-        <input id="mirName" placeholder="镜像名称" style="width:220px">
-        <button class="btn-primary btn-sm" onclick="addMirror()">生成 apikey</button>
-      </div>
-      <table><thead><tr><th>名称</th><th>apikey</th><th>状态</th><th>上次拉取</th><th>操作</th></tr></thead>
-      <tbody id="mirBody"></tbody></table>
-    </div>
-    <div class="panel">
-      <h2>社区镜像注册（client 可发现）</h2>
-      <div class="row">
-        <input id="regUrl" placeholder="镜像地址 https://..." style="width:280px">
-        <input id="regName" placeholder="名称（如 AEU 镜像）" style="width:180px">
-        <input id="regNote" placeholder="备注" style="width:180px">
-        <button class="btn-primary btn-sm" onclick="addRegistry()">登记</button>
-      </div>
-      <table><thead><tr><th>地址</th><th>名称</th><th>备注</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody id="regBody"></tbody></table>
-      <div class="msg muted">client 启动时会请求此列表并自动测速，选择延迟最低的镜像同步。</div>
     </div>
   </div>
 

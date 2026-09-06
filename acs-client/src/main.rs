@@ -1,24 +1,18 @@
-//! acs-client：A€（Alpha Coin）钱包客户端（本地 Web GUI）。
+//! acs-client：A€（Alpha Coin）钱包客户端（Tauri 桌面应用）。
 //!
-//! - 默认启动本地 Web 服务并自动打开浏览器（网页关闭后自动退出进程）
-//! - 首次使用在网页内完成注册引导
+//! - 默认启动 Tauri WebView 窗口（v3.0.0 弃用 axum 本地 Web 服务）
 //! - 非交互子命令：`status` / `sync` / `new` / `open` / `send` / `submit` / `confirm`（便于脚本与测试）
-
-mod client_api;
-mod sync;
-mod txn;
-mod wallet;
-mod web;
 
 use std::io;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 
-use crate::wallet::Wallet;
+use acs_client::{client_api, sync, txn, wallet};
+use acs_client::wallet::Wallet;
 
 #[derive(Parser)]
-#[command(name = "acs-client", version, about = "A€（Alpha Coin）钱包客户端 —— Web GUI / CLI")]
+#[command(name = "acs-client", version, about = "A€（Alpha Coin）钱包客户端 —— Tauri / CLI")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -79,8 +73,7 @@ enum Cmd {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Some(Cmd::Status) => cmd_status(),
@@ -93,36 +86,14 @@ async fn main() -> Result<()> {
         Some(Cmd::Submit { tx_id }) => cmd_submit(tx_id.as_deref()),
         Some(Cmd::Confirm { tx_id, pass, reject }) => cmd_confirm(tx_id.as_deref(), &pass, reject.as_deref()),
         Some(Cmd::Config { server, apikey }) => cmd_config(server.as_deref(), apikey.as_deref()),
-        None => run_web().await,
+        None => run_tauri(),
     }
 }
 
-/// 启动本地 Web GUI：绑定 127.0.0.1，自动打开浏览器；网页关闭（心跳超时）自动退出。
-async fn run_web() -> Result<()> {
-    let wallet = Wallet::open()?;
-    let (router, state) = web::build(wallet);
-    let port = 9580;
-    let url = format!("http://127.0.0.1:{port}");
-    open_browser(&url);
-    web::heartbeat_watch(state);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map_err(|e| anyhow!("启动本地服务失败（端口 {port} 可能被占用）：{e}"))?;
-    println!("A€ 钱包已启动：{url}（浏览器已打开，关闭网页后自动退出）");
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| anyhow!("本地服务异常：{e}"))?;
+/// 启动 Tauri 桌面应用（v3.0.0）。
+fn run_tauri() -> Result<()> {
+    acs_client::app_main();
     Ok(())
-}
-
-/// 打开系统默认浏览器。
-fn open_browser(url: &str) {
-    #[cfg(windows)]
-    let _ = std::process::Command::new("cmd")
-        .args(["/c", "start", "", url])
-        .spawn();
-    #[cfg(not(windows))]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 // ---------------- 非交互子命令 ----------------
@@ -244,10 +215,12 @@ fn cmd_send(receiver: &str, amount: i64, pass: &str) -> Result<()> {
         r = r[..idx].to_string();
         rtype = acs_core::models::AccountType::from_str(&ty).unwrap_or(acs_core::models::AccountType::Individual);
     }
-    let (tx_id, tx_hash) = txn::build_and_sign_transfer(&w, &r, rtype, amount, pass)?;
-    println!("已签名转账 → outbox");
-    println!("  tx_id : {tx_id}");
-    println!("  tx_hash: {tx_hash}");
+    let resp = txn::build_and_submit_transfer(&w, &r, rtype, amount, pass)?;
+    let tid = resp.get("tx_id").and_then(|v| v.as_str()).unwrap_or("");
+    let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    println!("转账已提交（v3.0.0 直接发送，无二次确认）");
+    println!("  tx_id : {tid}");
+    println!("  状态  : {status}");
     println!("  接收方: {} · {}", r, rtype.as_str());
     println!("  金额  : {amount} A€");
     Ok(())
@@ -285,7 +258,8 @@ fn cmd_open() -> Result<()> {
     }
     // 加密私钥取本地缓存；CLI 模式无密码，不启用登录取回（password_hash 留空）
     let sek = w.encrypted_seckey().unwrap_or_default();
-    let r = client_api::open_account(&w, &sek, "")?;
+    // CLI 为本地运维工具：以操作员身份明示同意（GUI 端已强制勾选才可自助注册）
+    let r = client_api::open_account(&w, &sek, "", true, true)?;
     println!("账户开立完成：{uid} · {ty}（余额 {bal} A€）",
         uid = r.get("uid").and_then(|v| v.as_str()).unwrap_or(""),
         ty = r.get("type").and_then(|v| v.as_str()).unwrap_or(""),

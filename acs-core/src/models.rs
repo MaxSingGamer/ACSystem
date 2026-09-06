@@ -133,6 +133,7 @@ pub enum TransactionStatus {
     Pending,
     Confirmed,
     Rejected,
+    Error, // 错误状态：交易无效/结算失败，金额不计入余额，且不可再修改状态
 }
 
 impl TransactionStatus {
@@ -141,6 +142,7 @@ impl TransactionStatus {
             TransactionStatus::Pending => "Pending",
             TransactionStatus::Confirmed => "Confirmed",
             TransactionStatus::Rejected => "Rejected",
+            TransactionStatus::Error => "Error",
         }
     }
 
@@ -149,6 +151,7 @@ impl TransactionStatus {
             "Pending" => Some(TransactionStatus::Pending),
             "Confirmed" => Some(TransactionStatus::Confirmed),
             "Rejected" => Some(TransactionStatus::Rejected),
+            "Error" => Some(TransactionStatus::Error),
             _ => None,
         }
     }

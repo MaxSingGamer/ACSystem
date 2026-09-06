@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["acs-core", "acs-server", "acs-client", "acs-mirror"]
+members = ["acs-core", "acs-server", "acs-client"]
 
 [profile.release]
 lto = true

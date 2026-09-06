@@ -121,6 +121,13 @@ impl Wallet {
     pub fn open() -> Result<Wallet> {
         let cfg = CoreConfig::client_default();
         cfg.ensure_dirs()?;
+        // 初始化本次启动的 .alphalog（data_dir 下，文件名 = 启动时间戳）
+        let _ = acs_core::log::init(&cfg.data_dir);
+        acs_core::log::info(format!(
+            "A€ 钱包启动 v{} 数据目录: {}",
+            acs_core::VERSION,
+            cfg.data_dir.display()
+        ));
         let conn = db_open(&cfg.db_path)?;
         acs_core::db::init_local(&conn)?;
         conn.execute_batch(CLIENT_SCHEMA)?;

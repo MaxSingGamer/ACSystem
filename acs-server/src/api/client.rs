@@ -1,10 +1,10 @@
-//! Client（Alpha Wallet / acs-mirror）接口：账户开立、交易提交、接收方确认/拒绝、待确认查询。
+//! Client（Alpha Wallet）接口：账户开立、交易提交、接收方确认/拒绝、待确认查询。
 //!
-//! 认证：client 凭 ed25519 签名（开立上传公钥、提交/确认用私钥签名），不依赖镜像 apikey。
-//! 镜像 apikey 仅用于 acs-mirror 服务向中心拉取（/api/mirror/pull）。
+//! 认证：client 凭 ed25519 签名（开立上传公钥、提交/确认用私钥签名）。
 //! 安全：提交前校验 tx_hash 一致性 + 发送方 ed25519 签名；确认前校验接收方签名。
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -29,6 +29,15 @@ pub fn routes() -> Router<AppState> {
         .route("/api/client/fetch-key", post(fetch_key))
         .route("/api/client/members", get(list_public_members))
         .route("/api/client/close", post(close_account))
+        .route("/api/legal/{doc}", get(legal_doc))
+}
+
+/// 公开：返回协议 / 隐私 HTML（client 注册前展示并获取同意）。doc: individual-terms / enterprise-terms / privacy
+async fn legal_doc(Path(doc): Path<String>) -> Response {
+    match crate::legal::doc_html(&doc) {
+        Some(html) => Html(html).into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, Json(json!({ "error": "文档不存在" }))).into_response(),
+    }
 }
 
 /// 公开：返回 AEU 已认定的成员国家与企业（Active），供 client 注册下拉选择。
@@ -115,6 +124,10 @@ pub struct OpenReq {
     pub encrypted_seckey: String, // 密码加密私钥（登录取回用）
     #[serde(default)]
     pub password_hash: String,    // $salt$sha256（客户端注册时上传）
+    #[serde(default)]
+    pub agree_terms: bool,        // 是否同意《使用协议》
+    #[serde(default)]
+    pub agree_privacy: bool,      // 是否同意《隐私政策》
 }
 
 async fn open_account(
@@ -181,11 +194,25 @@ async fn open_account(
     };
     account::create_account(&conn, &acc)?;
     // 存登录凭证（客户端注册时提供密码哈希；供登录取回）
+    // v3.1.0：凡创建登录凭证（即最终用户自助注册）须先同意《使用协议》/《隐私政策》，
+    // 未同意 → 服务端直接驳回。无密码哈希（开发/系统预置流程）不涉登录，不强制。
     if !req.password_hash.trim().is_empty() {
+        if !req.agree_terms || !req.agree_privacy {
+            return Err(ApiErr::forbidden("注册须先同意《使用协议》与《隐私政策》"));
+        }
         conn.execute(
-            "INSERT INTO account_credentials(uid, type, password_hash) VALUES (?1,?2,?3) \
-             ON CONFLICT(uid,type) DO UPDATE SET password_hash=excluded.password_hash",
-            params![acc.uid.clone(), atype.as_str(), req.password_hash.trim()],
+            "INSERT INTO account_credentials(uid, type, password_hash, last_login, agree_terms, agree_privacy) \
+             VALUES (?1,?2,?3,?4,?5,?6) \
+             ON CONFLICT(uid,type) DO UPDATE SET password_hash=excluded.password_hash, \
+               agree_terms=excluded.agree_terms, agree_privacy=excluded.agree_privacy",
+            params![
+                acc.uid.clone(),
+                atype.as_str(),
+                req.password_hash.trim(),
+                now.timestamp(),
+                i64::from(req.agree_terms),
+                i64::from(req.agree_privacy)
+            ],
         )
         .map_err(ApiErr::from_err)?;
     }
@@ -200,13 +227,21 @@ pub struct FetchKeyReq {
     #[serde(rename = "type", default)]
     pub atype: String, // 可空：空则按 UID 在所有账户类型中自动匹配
     pub password: String,
+    #[serde(default)]
+    pub agree_terms: bool,   // 是否已同意《使用协议》
+    #[serde(default)]
+    pub agree_privacy: bool, // 是否已同意《隐私政策》
 }
 
 /// 客户端登录：验证密码哈希，返回加密私钥与账户信息（供本机缓存或跨设备恢复）。
+/// v3.1.0：登录请求须携带协议同意标识；未同意则服务端拒绝（客户端也应前置拦截）。
 async fn fetch_key(
     State(st): State<AppState>,
     Json(req): Json<FetchKeyReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if !req.agree_terms || !req.agree_privacy {
+        return Err(ApiErr::forbidden("登录须先同意《使用协议》与《隐私政策》"));
+    }
     // 类型：指定则单类型；否则按 UID 在全部账户类型中自动匹配
     let atypes: Vec<AccountType> = if req.atype.trim().is_empty() {
         vec![
@@ -223,14 +258,14 @@ async fn fetch_key(
     let conn = st.db.lock().unwrap();
     let mut last_err: Option<ApiErr> = None;
     for atype in atypes {
-        let stored: Option<String> = conn
+        let stored: Option<(String, i64)> = conn
             .query_row(
-                "SELECT password_hash FROM account_credentials WHERE uid=?1 AND type=?2",
+                "SELECT password_hash, agree_terms FROM account_credentials WHERE uid=?1 AND type=?2",
                 params![req.uid, atype.as_str()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok();
-        let Some(stored) = stored else { continue };
+        let Some((stored, _agreed)) = stored else { continue };
         let (salt, hash) = stored.split_once('$').unwrap_or(("", &stored));
         if crate::auth::hash_password(&req.password, salt) != hash {
             last_err = Some(ApiErr::forbidden("密码错误"));
@@ -241,6 +276,11 @@ async fn fetch_key(
         if acc.status != AccountStatus::Active {
             return Err(ApiErr::forbidden("该账户已注销/冻结，无法登录"));
         }
+        // 更新上次登录时间
+        let _ = conn.execute(
+            "UPDATE account_credentials SET last_login=?1 WHERE uid=?2 AND type=?3",
+            params![chrono::Utc::now().timestamp(), req.uid, atype.as_str()],
+        );
         return Ok(Json(json!({
             "ok": true,
             "uid": acc.uid,

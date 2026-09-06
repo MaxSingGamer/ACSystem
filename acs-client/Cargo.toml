@@ -1,9 +1,12 @@
 [package]
 name = "acs-client"
-version = "2.2.0"
+version = "3.0.0"
 edition = "2024"
-description = "A€（Alpha Coin）钱包客户端 —— CLI / TUI，界面与交互参考 OpenCode"
+description = "A€（Alpha Coin）钱包客户端 —— Tauri 桌面应用（Web GUI）"
 license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 acs-core = { path = "../acs-core" }
@@ -17,5 +20,5 @@ sha2 = "0.10"
 rusqlite = { version = "0.40", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-axum = "0.8"
+tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }

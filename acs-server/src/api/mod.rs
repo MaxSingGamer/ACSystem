@@ -6,16 +6,45 @@ pub mod audit;
 pub mod client;
 pub mod keys;
 pub mod members;
-pub mod mirror;
 pub mod stats;
+pub mod sync;
 
+use axum::extract::Request;
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::state::AppState;
+
+/// 全请求日志中间件：每个进入的 HTTP 请求写入 .alphalog（NET 记录方法与路径，OUT 记录状态码）。
+/// 用于「全调用 / 全通讯 / 全错误」无死角记录；查询串与路径经 mask 脱敏（避免泄路径泄露敏感名）。
+pub async fn log_request(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let ip = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "-".to_string());
+    let line = if query.is_empty() {
+        format!("{method} {path}")
+    } else {
+        format!("{method} {path}?{query}")
+    };
+    crate::log::net(&format!("{line} (ip={})", crate::log::mask(&ip)));
+    let started = std::time::Instant::now();
+    let resp = next.run(req).await;
+    let status = resp.status();
+    crate::log::out(&format!("{method} {path} → HTTP {status}（{}ms）", started.elapsed().as_millis()));
+    resp
+}
 
 #[derive(Serialize)]
 pub struct ApiErrorBody {
@@ -53,6 +82,7 @@ impl ApiErr {
 
 impl IntoResponse for ApiErr {
     fn into_response(self) -> Response {
+        crate::log::err(&format!("API {}：{}", self.status.as_u16(), self.message));
         (self.status, Json(ApiErrorBody { error: self.message })).into_response()
     }
 }
@@ -88,12 +118,12 @@ pub fn admin_routes() -> Router<AppState> {
         .merge(members::routes())
         .merge(audit::routes())
         .merge(keys::routes())
-        .merge(mirror::admin_routes())
 }
 
-/// 公开路由（client / mirror 调用；对外监听，仅 apikey 认证，无网页）。
+/// 公开路由（client 调用；对外监听，无网页）。
 pub fn public_routes() -> Router<AppState> {
     Router::new()
         .merge(client::routes())
-        .merge(mirror::public_routes())
+        .merge(sync::routes())
+        .merge(crate::update::routes())
 }

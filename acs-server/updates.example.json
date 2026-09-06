@@ -1,0 +1,11 @@
+{
+  "version": "3.0.1",
+  "notes": "本次更新：修复若干问题，提升稳定性。",
+  "assets": {
+    "windows-x64": {
+      "file": "acs-client-3.0.1-windows-x64-setup.exe",
+      "sha256": "请在此填写安装包 SHA-256（小写十六进制）",
+      "notes": "Windows x64 客户端安装包"
+    }
+  }
+}
