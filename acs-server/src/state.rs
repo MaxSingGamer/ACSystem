@@ -24,6 +24,16 @@ pub struct AppState {
     pub token_ttl_secs: i64,
     /// 服务器数据目录（~/.alpha_dir/acs-server），内置 updates/ 供客户端下载。
     pub data_dir: PathBuf,
+    /// 发行账户 uid（.env 的 PRE_ISSUED_ACCOUNT）；铸造/展示用。
+    pub pre_issued: String,
+    /// 登录失败次数与锁定截止（暴力破解防护），key = 账户 uid。
+    pub login_fails: Arc<Mutex<HashMap<String, LoginFail>>>,
+}
+
+/// 单个账户的登录失败记录。
+pub struct LoginFail {
+    pub count: u32,
+    pub locked_until: i64,
 }
 
 #[derive(Clone, Default)]
@@ -45,7 +55,12 @@ pub struct Session {
 }
 
 impl AppState {
-    pub fn new(conn: Connection, gpg: GpgUtil, data_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        conn: Connection,
+        gpg: GpgUtil,
+        data_dir: std::path::PathBuf,
+        pre_issued: String,
+    ) -> Self {
         AppState {
             db: Arc::new(Mutex::new(conn)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -55,6 +70,8 @@ impl AppState {
             gpg,
             token_ttl_secs: 600, // 10 分钟待机
             data_dir,
+            pre_issued,
+            login_fails: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

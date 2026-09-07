@@ -20,12 +20,13 @@ pub struct Logger {
     started_at: i64,
 }
 
-/// 初始化：在 data_dir 下新建 `{启动时间}.alphalog`。每次启动均新建。
+/// 初始化：在 data_dir/logs 下新建 `{启动时间}.alphalog`。每次启动均新建。
 pub fn init(data_dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+    let log_dir = data_dir.join("logs");
+    fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
     let started_at = chrono::Utc::now().timestamp_millis();
     let name = format!("{started_at}.alphalog");
-    let path = data_dir.join(name);
+    let path = log_dir.join(name);
     let mut l = LOGGER.lock().unwrap();
     *l = Some(Logger { path, started_at });
     Ok(())

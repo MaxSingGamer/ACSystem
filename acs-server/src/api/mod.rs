@@ -72,6 +72,9 @@ impl ApiErr {
     pub fn not_found(m: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, m)
     }
+    pub fn too_many_requests(m: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, m)
+    }
     pub fn internal(m: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, m)
     }

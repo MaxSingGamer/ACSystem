@@ -45,6 +45,7 @@ async fn list_public_members(State(st): State<AppState>) -> ApiResult<Json<serde
     let conn = st.db.lock().unwrap();
     let mut countries = Vec::new();
     let mut companies = Vec::new();
+    let mut systems = Vec::new();
     {
         let mut stmt = conn
             .prepare("SELECT name FROM member_countries WHERE status='Active' ORDER BY name")
@@ -67,7 +68,18 @@ async fn list_public_members(State(st): State<AppState>) -> ApiResult<Json<serde
             companies.push(r.map_err(ApiErr::from_err)?);
         }
     }
-    Ok(Json(json!({ "countries": countries, "companies": companies, "systems": ["PreIssuedAccount", "AESystem", "AlphaEU"] })))
+    {
+        let mut stmt = conn
+            .prepare("SELECT uid FROM accounts_system WHERE status='Active' ORDER BY uid")
+            .map_err(ApiErr::from_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(ApiErr::from_err)?;
+        for r in rows {
+            systems.push(r.map_err(ApiErr::from_err)?);
+        }
+    }
+    Ok(Json(json!({ "countries": countries, "companies": companies, "systems": systems })))
 }
 
 // ---------- 注销账户（中心侧：状态改 Deleted，账本只读保留） ----------

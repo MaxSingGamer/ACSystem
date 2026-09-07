@@ -74,7 +74,11 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // --debug 为“透传标记”，在交给 clap 前先过滤掉，避免被当作未知参数。
+    #[cfg(target_os = "windows")]
+    let debug = std::env::args().any(|a| a == "--debug");
+    let args: Vec<String> = std::env::args().filter(|a| a != "--debug").collect();
+    let cli = Cli::parse_from(args);
     match cli.cmd {
         Some(Cmd::Status) => cmd_status(),
         Some(Cmd::Sync) => cmd_sync(),
@@ -86,7 +90,34 @@ fn main() -> Result<()> {
         Some(Cmd::Submit { tx_id }) => cmd_submit(tx_id.as_deref()),
         Some(Cmd::Confirm { tx_id, pass, reject }) => cmd_confirm(tx_id.as_deref(), &pass, reject.as_deref()),
         Some(Cmd::Config { server, apikey }) => cmd_config(server.as_deref(), apikey.as_deref()),
-        None => run_tauri(),
+        None => {
+            // 除非以 --debug 启动，否则隐藏黑色后端控制台窗口（仅写 .alphalog）。
+            #[cfg(target_os = "windows")]
+            if !debug {
+                hide_console();
+            }
+            run_tauri()
+        }
+    }
+}
+
+/// 隐藏控制台窗口（Windows）。GUI 启动时调用，避免闪现黑色后端窗口。
+#[cfg(target_os = "windows")]
+fn hide_console() {
+    use std::os::raw::c_void;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> *mut c_void;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn ShowWindow(hWnd: *mut c_void, nCmdShow: i32) -> i32;
+    }
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, 0); // SW_HIDE
+        }
     }
 }
 

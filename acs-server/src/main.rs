@@ -49,16 +49,20 @@ async fn main() -> anyhow::Result<()> {
     println!("[acs-server] gpg 来源: {:?} -> {}", gpg_src, gpg_bin.display());
     let gpg = GpgUtil::new(gpg_bin, cfg.gpg_homedir.clone());
 
+    // 设置控制台窗口标题（Windows）
+    set_console_title();
+
     let conn = db::open_db(&cfg.db_path)?;
     db::init_central(&conn)?;
     state::init_server_db(&conn)?;
     db::migrate_center(&conn)?;
-    seed_from_config(&conn, &gpg, &cfg)?;
+    // 校验并输出发行账户（.env 的 PRE_ISSUED_ACCOUNT）；校验失败会返回 Err，拒绝启动。
+    let pre_issued = seed_from_config(&conn, &gpg, &cfg)?;
 
     // 客户端更新包目录（updates/update.json + 安装包）
     let updates_dir = cfg.data_dir.join("updates");
     std::fs::create_dir_all(&updates_dir)?;
-    let state = AppState::new(conn, gpg, cfg.data_dir.clone());
+    let state = AppState::new(conn, gpg, cfg.data_dir.clone(), pre_issued);
     // 网络安全加固（两服务共用）：
     // - 请求体大小限制 4MB（防超大 payload；pubkey/sig 均远小于此）
     // - 请求超时 30s（防慢速攻击）
@@ -165,6 +169,8 @@ struct SystemSeed {
 struct EnvConfig {
     admins: Vec<AdminSeed>,
     systems: Vec<SystemSeed>,
+    /// 发行账户（.env 的 PRE_ISSUED_ACCOUNT），必须为 systems 中唯一一员。
+    pre_issued: Option<String>,
 }
 
 /// .env 文件路径：各端独立目录（服务端 ~/.alpha_dir/acs-server/.env）。
@@ -177,6 +183,7 @@ fn load_env_config(data_dir: &Path) -> Option<EnvConfig> {
     let content = std::fs::read_to_string(data_dir_env_path(data_dir)).ok()?;
     let mut admins = Vec::new();
     let mut systems = Vec::new();
+    let mut pre_issued: Option<String> = None;
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -209,34 +216,87 @@ fn load_env_config(data_dir: &Path) -> Option<EnvConfig> {
                     }
                 }
             }
+            // 发行账户：只能设置一个，须为 ACS_SYSTEM_ACCOUNTS 之一
+            "PRE_ISSUED_ACCOUNT" => {
+                pre_issued = Some(value.to_string());
+            }
             _ => {}
         }
     }
     if admins.is_empty() && systems.is_empty() {
         None
     } else {
-        Some(EnvConfig { admins, systems })
+        Some(EnvConfig { admins, systems, pre_issued })
     }
 }
 
 /// 统一种子入口：
-/// - 无 .env：默认 admin（随机密码输出 txt），不创建系统账户
-/// - 有 .env：禁用默认 admin，按 .env 创建管理员 + 系统账户（密码只存哈希，不输出 txt）
+/// - 无 .env：默认 admin（随机密码输出 txt），不创建系统账户，发行账户为空串
+/// - 有 .env：禁用默认 admin，按 .env 创建管理员 + 系统账户（密码只存哈希，不输出 txt）；
+///   并校验 PRE_ISSUED_ACCOUNT（须存在、唯一、且为 ACS_SYSTEM_ACCOUNTS 之一），否则拒绝启动。
+/// 返回发行账户 uid（用于 mint/展示），无配置时为空串。
 fn seed_from_config(
     conn: &rusqlite::Connection,
     gpg: &GpgUtil,
     cfg: &CoreConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     match load_env_config(&cfg.data_dir) {
-        None => seed_default_admin(conn, gpg, cfg)?,
+        None => {
+            seed_default_admin(conn, gpg, cfg)?;
+            Ok(String::new())
+        }
         Some(conf) => {
+            validate_pre_issued(&conf)?;
             disable_default_admin(conn)?;
             seed_admins_from_env(conn, gpg, &conf.admins)?;
             seed_systems_from_env(conn, gpg, cfg, &conf.systems)?;
+            Ok(conf.pre_issued.clone().unwrap_or_default())
         }
+    }
+}
+
+/// 校验 PRE_ISSUED_ACCOUNT：非空、单个、且为 ACS_SYSTEM_ACCOUNTS 之一。
+/// 失败时写 .alphalog 错误并返回 Err，拒绝启动。
+fn validate_pre_issued(conf: &EnvConfig) -> anyhow::Result<()> {
+    let Some(pre) = &conf.pre_issued else {
+        // 无系统账户时允许“仅管理员”模式；有系统账户则必须配置发行账户。
+        if conf.systems.is_empty() {
+            return Ok(());
+        }
+        log::err("发行账户未配置：需在 .env 设置 PRE_ISSUED_ACCOUNT，拒绝启动");
+        anyhow::bail!("PRE_ISSUED_ACCOUNT 未设置；必须在 ACS_SYSTEM_ACCOUNTS 中指定唯一发行账户");
+    };
+    let pre = pre.trim();
+    if pre.is_empty() || pre.contains(',') {
+        log::err(format!("发行账户配置非法：{pre}；只能设置一个"));
+        anyhow::bail!("PRE_ISSUED_ACCOUNT=<账户名> 只能设置一个，不能为空或含逗号");
+    }
+    let ok = conf.systems.iter().any(|s| s.uid == pre);
+    if !ok {
+        log::err(format!("发行账户 {pre} 不在 ACS_SYSTEM_ACCOUNTS 中，拒绝启动"));
+        anyhow::bail!("PRE_ISSUED_ACCOUNT={pre} 必须是 ACS_SYSTEM_ACCOUNTS 中的一员");
     }
     Ok(())
 }
+
+/// 设置控制台窗口标题（Windows）为 Alpha Coin Central Server。
+#[cfg(target_os = "windows")]
+fn set_console_title() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleTitleW(lpConsoleTitle: *const u16) -> i32;
+    }
+    let title: Vec<u16> = "Alpha Coin Central Server"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        SetConsoleTitleW(title.as_ptr());
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_console_title() {}
 
 /// 无配置：创建默认 admin（root），随机密码输出到 SYSTEM_LOGIN_PASSWORDS.txt。
 fn seed_default_admin(

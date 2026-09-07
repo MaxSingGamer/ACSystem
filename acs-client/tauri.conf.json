@@ -1,15 +1,16 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "A€ 钱包",
+  "productName": "Alpha Wallet",
   "version": "3.0.0",
   "identifier": "top.acsystem.wallet",
   "build": {
     "frontendDist": "."
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
-        "title": "A€ 钱包",
+        "title": "Alpha Wallet",
         "width": 1180,
         "height": 780,
         "minWidth": 900,
@@ -19,13 +20,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; frame-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
     "icon": [
+      "icons/icon-client.png",
       "icons/icon.ico"
     ]
   }

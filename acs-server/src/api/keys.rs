@@ -135,7 +135,7 @@ pub struct MintReq {
     pub amount: i64,
 }
 
-/// 铸造（Mint）：根管理员解锁自己的密钥后，向 PreIssuedAccount 增发 A€。
+/// 铸造（Mint)：根管理员解锁自己的密钥后，向发行账户（.env 的 PRE_ISSUED_ACCOUNT）增发 A€。
 async fn mint(
     State(st): State<AppState>,
     auth: AuthUser,
@@ -147,15 +147,18 @@ async fn mint(
     if req.amount <= 0 {
         return Err(ApiErr::bad_request("金额须大于 0"));
     }
+    if st.pre_issued.is_empty() {
+        return Err(ApiErr::bad_request("未配置发行账户（PRE_ISSUED_ACCOUNT）"));
+    }
     let conn = st.db.lock().unwrap();
-    let pre = acs_core::account::require_account(&conn, "PreIssuedAccount", AccountType::System)
+    let pre = acs_core::account::require_account(&conn, &st.pre_issued, AccountType::System)
         .map_err(ApiErr::from)?;
 
     let mut tx = Transaction::new(
         TransactionType::Mint,
         auth.username.clone(),
         AccountType::System,
-        "PreIssuedAccount".into(),
+        st.pre_issued.clone(),
         AccountType::System,
         req.amount,
     );
@@ -170,7 +173,7 @@ async fn mint(
     drop(conn);
 
     let conn = st.db.lock().unwrap();
-    log_audit(&conn, &auth.username, "mint", &format!("+{} -> PreIssuedAccount", req.amount));
+    log_audit(&conn, &auth.username, "mint", &format!("+{} -> {}", req.amount, st.pre_issued));
     Ok(Json(json!({ "ok": true, "tx_id": tx_id, "amount": req.amount })))
 }
 

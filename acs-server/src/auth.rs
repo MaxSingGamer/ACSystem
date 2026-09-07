@@ -14,7 +14,7 @@ use acs_core::gpg::GpgUtil;
 use acs_core::models::{AdminRole, GeneratedKey};
 
 use crate::api::{ApiErr, ApiResult};
-use crate::state::{AppState, Session};
+use crate::state::{AppState, LoginFail, Session};
 
 /// sha256(salt:password) 十六进制（仅存哈希）。
 pub fn hash_password(password: &str, salt: &str) -> String {
@@ -23,6 +23,44 @@ pub fn hash_password(password: &str, salt: &str) -> String {
     h.update(b":");
     h.update(password.as_bytes());
     hex::encode(h.finalize())
+}
+
+/// 常量时间比较（防时序攻击）：等长字符串逐字节异或，不因首个差异提前返回。
+fn ct_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// 登录失败次数上限（达到后锁定账户）。
+const MAX_LOGIN_FAILS: u32 = 5;
+/// 锁定基础时长（秒）；每多超一次倍增，封顶 LOCK_MAX_SECS。
+const LOCK_BASE_SECS: i64 = 30;
+const LOCK_MAX_SECS: i64 = 300;
+
+/// 记录一次登录失败：达到上限后对账户设置锁定截止时间（指数退避）。
+fn register_fail(st: &AppState, uid: &str, now: i64) {
+    let mut fails = st.login_fails.lock().unwrap();
+    let e = fails
+        .entry(uid.to_string())
+        .or_insert(LoginFail { count: 0, locked_until: 0 });
+    e.count += 1;
+    if e.count >= MAX_LOGIN_FAILS {
+        let over = (e.count - MAX_LOGIN_FAILS + 1) as i64;
+        let secs = (LOCK_BASE_SECS * over).min(LOCK_MAX_SECS);
+        e.locked_until = now + secs;
+    }
+    // 防止表无限膨胀：超过阈值时清理已过期的记录。
+    if fails.len() > 10_000 {
+        fails.retain(|_, f| f.locked_until > now);
+    }
 }
 
 #[derive(Deserialize)]
@@ -49,6 +87,19 @@ pub async fn login(
     State(st): State<AppState>,
     Json(req): Json<LoginReq>,
 ) -> ApiResult<Json<LoginResp>> {
+    let now = Utc::now().timestamp();
+    // 暴力破解防护：账户已被锁定时直接拒绝。
+    {
+        let fails = st.login_fails.lock().unwrap();
+        if let Some(f) = fails.get(&req.uid) {
+            if f.locked_until > now {
+                let wait = f.locked_until - now;
+                return Err(ApiErr::too_many_requests(format!(
+                    "尝试过于频繁，请 {wait} 秒后重试"
+                )));
+            }
+        }
+    }
     let conn = st.db.lock().unwrap();
     let row: Option<(i64, String, String, bool)> = conn
         .query_row(
@@ -67,12 +118,16 @@ pub async fn login(
         .optional()
         .map_err(ApiErr::from_err)?;
     let Some((id, role, pw_hash, must_change)) = row else {
+        register_fail(&st, &req.uid, now);
         return Err(ApiErr::unauthorized("账号或密码错误"));
     };
     let (salt, stored) = pw_hash.split_once('$').unwrap_or(("", &pw_hash));
-    if hash_password(&req.password, salt) != stored {
+    if !ct_eq(&hash_password(&req.password, salt), stored) {
+        register_fail(&st, &req.uid, now);
         return Err(ApiErr::unauthorized("账号或密码错误"));
     }
+    // 登录成功：清空该账户的失败记录。
+    st.login_fails.lock().unwrap().remove(&req.uid);
     let role = AdminRole::from_str(&role).ok_or_else(|| ApiErr::internal("后台角色配置异常"))?;
     // 记录管理员上次登录时间
     let _ = st.db.lock().unwrap().execute(
