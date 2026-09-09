@@ -3,6 +3,10 @@
 //! - 默认启动 Tauri WebView 窗口（v3.0.0 弃用 axum 本地 Web 服务）
 //! - 非交互子命令：`status` / `sync` / `new` / `open` / `send` / `submit` / `confirm`（便于脚本与测试）
 
+// release 以 Windows GUI 子系统链接：双击启动时系统根本不会分配黑色控制台窗口。
+// （CLI 子命令 / --debug 等带参数从终端启动时，见 attach_cli_console() 附加父控制台。）
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::io;
 
 use anyhow::{anyhow, Result};
@@ -74,6 +78,13 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // release 为 GUI 子系统（默认无控制台）。凡带参数启动（子命令 / --debug / --help 等）
+    // 视为从终端调用，先附加父进程控制台，保证 clap 帮助与 println 输出可见。
+    #[cfg(all(target_os = "windows", not(debug_assertions)))]
+    if std::env::args_os().count() > 1 {
+        attach_cli_console();
+    }
+
     // --debug 为“透传标记”，在交给 clap 前先过滤掉，避免被当作未知参数。
     #[cfg(target_os = "windows")]
     let debug = std::env::args().any(|a| a == "--debug");
@@ -102,6 +113,7 @@ fn main() -> Result<()> {
 }
 
 /// 隐藏控制台窗口（Windows）。GUI 启动时调用，避免闪现黑色后端窗口。
+/// （release 已以 GUI 子系统编译、系统不分配控制台，此函数主要兜底 debug 构建与从已有控制台启动的情形。）
 #[cfg(target_os = "windows")]
 fn hide_console() {
     use std::os::raw::c_void;
@@ -117,6 +129,52 @@ fn hide_console() {
         let hwnd = GetConsoleWindow();
         if !hwnd.is_null() {
             ShowWindow(hwnd, 0); // SW_HIDE
+        }
+    }
+}
+
+/// （release 专用）GUI 子系统进程默认无控制台。带参数从终端启动时，
+/// 附加到父进程控制台并重定向标准句柄，使 CLI / --debug 的 println 输出可见。
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
+fn attach_cli_console() {
+    use std::os::windows::io::AsRawHandle;
+    use std::os::raw::c_void;
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6; // -10
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5; // -11
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // -12
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(dwProcessId: u32) -> i32;
+        fn GetConsoleWindow() -> *mut c_void;
+        fn SetStdHandle(nStdHandle: u32, hHandle: *mut c_void) -> i32;
+    }
+    unsafe {
+        if !GetConsoleWindow().is_null() {
+            return; // 已有控制台，无需附加
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return; // 无父控制台（非终端启动），保持无窗口
+        }
+        // 打开并绑定 CONOUT$/CONIN$。句柄需长驻，故泄漏（进程生命周期内有效）。
+        // 说明：Rust 标准输出在首次 println 时才取句柄，先 SetStdHandle 即可生效。
+        let out = std::fs::OpenOptions::new().write(true).open("CONOUT$").ok();
+        let err = std::fs::OpenOptions::new().write(true).open("CONOUT$").ok();
+        let inn = std::fs::OpenOptions::new().read(true).open("CONIN$").ok();
+        if let Some(f) = out {
+            let h = f.as_raw_handle();
+            SetStdHandle(STD_OUTPUT_HANDLE, h);
+            std::mem::forget(f);
+        }
+        if let Some(f) = err {
+            let h = f.as_raw_handle();
+            SetStdHandle(STD_ERROR_HANDLE, h);
+            std::mem::forget(f);
+        }
+        if let Some(f) = inn {
+            let h = f.as_raw_handle();
+            SetStdHandle(STD_INPUT_HANDLE, h);
+            std::mem::forget(f);
         }
     }
 }
