@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
 
     let public_bind = std::env::var("ACS_PUBLIC_BIND").unwrap_or_else(|_| "0.0.0.0".into());
     let public_port = std::env::var("ACS_PUBLIC_PORT").unwrap_or_else(|_| "9600".into());
-    // 后台管理默认仅本机（不开放公网）
+    // 后台管理默认仅本机；可通过 ACS_ADMIN_BIND=0.0.0.0 开放公网
     let admin_bind = std::env::var("ACS_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1".into());
     let admin_port = std::env::var("ACS_ADMIN_PORT").unwrap_or_else(|_| "9680".into());
 
@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::net::TcpListener::bind(format!("{admin_bind}:{admin_port}")).await?;
 
     println!("[acs-server] 公开 API（client）: http://{public_bind}:{public_port}");
-    println!("[acs-server] 后台管理（仅内网）: http://{admin_bind}:{admin_port}");
+    println!("[acs-server] 后台管理: http://{admin_bind}:{admin_port}");
     println!("[acs-server] 账户种子：见 {}/.env（无配置时默认 admin，初始密码见 SYSTEM_LOGIN_PASSWORDS.txt）", cfg.data_dir.display());
 
     let pub_handle = tokio::spawn(async move { axum::serve(public_listener, public_app).await });

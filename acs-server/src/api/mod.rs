@@ -108,7 +108,7 @@ impl From<acs_core::errors::AcsError> for ApiErr {
 
 pub type ApiResult<T> = std::result::Result<T, ApiErr>;
 
-/// 管理侧路由（后台网页 + 管理 API；仅内网监听，不开放公网）。
+/// 管理侧路由（后台网页 + 管理 API）。
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
         .route("/api/admin/login", post(crate::auth::login))
