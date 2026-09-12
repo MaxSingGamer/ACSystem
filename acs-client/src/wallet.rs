@@ -16,10 +16,12 @@ use acs_core::models::{AccountType, GeneratedKey};
 /// client 专用附加表。
 pub const CLIENT_SCHEMA: &str = r#"
 -- 镜像账户快照（只读，来自中心 /api/mirror/pull 的 accounts）
+-- 主键为 (uid,type)：同名不同类账户（如管理员系统身份 vs 个人账户）互不覆盖
 CREATE TABLE IF NOT EXISTS mirror_accounts(
-    uid TEXT PRIMARY KEY, type TEXT NOT NULL,
+    uid TEXT NOT NULL, type TEXT NOT NULL,
     balance INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Active',
-    last_tx_hash TEXT, changed_at INTEGER NOT NULL DEFAULT 0, synced_at INTEGER NOT NULL);
+    last_tx_hash TEXT, changed_at INTEGER NOT NULL DEFAULT 0, synced_at INTEGER NOT NULL,
+    PRIMARY KEY(uid, type));
 -- 待提交交易（本地构建 + 签名，尚未/等待提交至中心）
 CREATE TABLE IF NOT EXISTS outbox(
     tx_id TEXT PRIMARY KEY, tx_json TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -96,6 +98,33 @@ fn meta_set(conn: &Connection, k: &str, v: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 一次性迁移：修正“只按 uid 归属”导致的同名账户串账。
+/// - `mirror_accounts` 旧版主键为 `uid`（同名不同类账户互相覆盖）→ 删除重建为复合主键 `(uid,type)`
+/// - `local_ledger` 可能残留按 uid 误归属的历史（如把铸造交易算成个人支出）→ 清空，待下次同步重建
+fn migrate_uid_type(conn: &Connection) -> rusqlite::Result<()> {
+    if meta_get(conn, "fix_uidtype_v1").is_some() {
+        return Ok(());
+    }
+    let old: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='mirror_accounts'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(s) = old {
+        if s.contains("uid TEXT PRIMARY KEY") {
+            conn.execute_batch("DROP TABLE mirror_accounts;")?;
+        }
+    }
+    // CLIENT_SCHEMA 为幂等 CREATE IF NOT EXISTS，重建被删除的表
+    conn.execute_batch(CLIENT_SCHEMA)?;
+    conn.execute_batch("DELETE FROM local_ledger;")?;
+    meta_set(conn, "fix_uidtype_v1", "1")?;
+    acs_core::log::info("已迁移：账户归属改为 (uid,type)，本地账本缓存已清空");
+    Ok(())
+}
+
 fn load_info(conn: &Connection) -> WalletInfo {
     let atype = meta_get(conn, "wallet_type")
         .and_then(|s| AccountType::from_str(&s))
@@ -131,6 +160,7 @@ impl Wallet {
         let conn = db_open(&cfg.db_path)?;
         acs_core::db::init_local(&conn)?;
         conn.execute_batch(CLIENT_SCHEMA)?;
+        migrate_uid_type(&conn)?;
 
         let (gpg_bin, _src) = acs_core::gpg_detect::ensure_gpg()
             .map_err(|e| anyhow!("未找到 gpg：{e}"))?;
@@ -199,11 +229,12 @@ impl Wallet {
     }
 
     /// 本账户在最近一次镜像快照中的余额（中心口径）。
+    /// 按 (uid,type) 查询：避免同名不同类型的账户（如管理员系统身份）串账。
     pub fn mirror_balance(&self) -> i64 {
         self.conn
             .query_row(
-                "SELECT balance FROM mirror_accounts WHERE uid=?1",
-                params![self.info.uid],
+                "SELECT balance FROM mirror_accounts WHERE uid=?1 AND type=?2",
+                params![self.info.uid, self.info.atype.as_str()],
                 |r| r.get(0),
             )
             .unwrap_or(0)

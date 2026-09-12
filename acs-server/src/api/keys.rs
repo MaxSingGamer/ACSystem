@@ -19,6 +19,14 @@ use crate::api::{ApiErr, ApiResult};
 use crate::auth::AuthUser;
 use crate::state::{AppState, CentralState};
 
+/// 铸造（发行）交易的名义发出方：固定的“货币当局”标识。
+///
+/// 不再使用管理员登录 UID 作为发出方——否则当管理员 UID 与某个真实账户 UID 同名时
+/// （例如 root 管理员 `Max_Shin` 与个人账户 `Max_Shin`），会在客户端按 UID 归属时串账。
+/// 实际铸造人由审计日志（`log_audit(..., "mint", ...)`）记录。
+/// 该标识不是任何真实账户（不出现在账户表），仅作交易发出方占位。
+const MINT_AUTHORITY_UID: &str = "MintAuthority";
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/admin/keys/status", get(key_status))
@@ -156,7 +164,7 @@ async fn mint(
 
     let mut tx = Transaction::new(
         TransactionType::Mint,
-        auth.username.clone(),
+        MINT_AUTHORITY_UID.to_string(),
         AccountType::System,
         st.pre_issued.clone(),
         AccountType::System,

@@ -75,6 +75,7 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
 
     // 合并交易到 local_ledger（仅与本账户相关的交易；direction: +1 收 / -1 支 / 0 未知）
     let our = w.info.uid.as_str();
+    let our_type = w.info.atype.as_str();
     let mut txs = 0usize;
     if let Some(arr) = data.get("transactions").and_then(|v| v.as_array()) {
         for t in arr {
@@ -90,10 +91,11 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
             let central_sig = t.get("central_sig").and_then(|v| v.as_str());
             let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("Pending");
 
-            // 仅记录与本账户相关的交易；据此确定方向与对方
-            let (direction, peer, peer_type) = if sender == our {
+            // 仅记录与本账户相关的交易；据此确定方向与对方。
+            // 必须同时比较“类型”：否则与本人同名的其他类型账户（如管理员系统身份）会串账。
+            let (direction, peer, peer_type) = if sender == our && sender_type == our_type {
                 (-1i64, receiver, receiver_type)
-            } else if receiver == our {
+            } else if receiver == our && receiver_type == our_type {
                 (1i64, sender, sender_type)
             } else {
                 continue;
@@ -128,8 +130,8 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
             let n = w.conn.execute(
                 "INSERT INTO mirror_accounts(uid,type,balance,status,last_tx_hash,changed_at,synced_at) \
                  VALUES (?1,?2,?3,?4,?5,?6,?7) \
-                 ON CONFLICT(uid) DO UPDATE SET \
-                   type=excluded.type, balance=excluded.balance, status=excluded.status, \
+                 ON CONFLICT(uid,type) DO UPDATE SET \
+                   balance=excluded.balance, status=excluded.status, \
                    last_tx_hash=excluded.last_tx_hash, changed_at=excluded.changed_at, synced_at=excluded.synced_at",
                 params![uid, atype, balance, status, last_tx_hash, changed_at, now],
             )?;

@@ -129,8 +129,8 @@ pub async fn login(
     // 登录成功：清空该账户的失败记录。
     st.login_fails.lock().unwrap().remove(&req.uid);
     let role = AdminRole::from_str(&role).ok_or_else(|| ApiErr::internal("后台角色配置异常"))?;
-    // 记录管理员上次登录时间
-    let _ = st.db.lock().unwrap().execute(
+    // 记录管理员上次登录时间（复用已持有的 conn：std::sync::Mutex 不可重入，二次 lock 会自死锁）
+    let _ = conn.execute(
         "UPDATE admins SET last_login=?1 WHERE id=?2",
         rusqlite::params![Utc::now().timestamp(), id],
     );

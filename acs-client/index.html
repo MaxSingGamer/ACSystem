@@ -87,7 +87,7 @@
   .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; margin-bottom:16px;}
   .stat{background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:18px; box-shadow:var(--shadow);}
   .stat .k{font-size:12px; color:var(--mut);}
-  .stat .v{font-size:24px; font-weight:800; margin-top:6px;}
+  .stat .v{font-size:24px; font-weight:800; margin-top:6px; overflow-wrap:anywhere; word-break:break-word;}
   .stat .v.acc{color:var(--acc);} .stat .v.ok{color:var(--ok);} .stat .v.err{color:var(--err);} .stat .v.warn{color:var(--warn);}
   .balance-hero{background:linear-gradient(135deg,var(--acc),var(--acc2)); color:#fff; border-radius:20px; padding:26px; margin-bottom:18px; box-shadow:var(--shadow);}
   .balance-hero .k{font-size:12.5px; opacity:.85;}
@@ -95,7 +95,7 @@
   .balance-hero .sub{margin-top:10px; font-size:12.5px; opacity:.9;}
   table{width:100%; border-collapse:collapse; font-size:13.5px;}
   th{color:var(--mut); font-weight:600; text-align:left; padding:10px 8px; border-bottom:1px solid var(--border); white-space:nowrap;}
-  td{padding:10px 8px; border-bottom:1px solid var(--border); vertical-align:top;}
+  td{padding:10px 8px; border-bottom:1px solid var(--border); vertical-align:top; word-break:break-word;}
   tr:hover td{background:var(--panel2);}
   .field{margin-bottom:14px;}
   .field label{display:block; color:var(--mut); font-size:12.5px; margin-bottom:6px;}
@@ -182,8 +182,8 @@
       <span class="sp"></span>
       <span class="muted" id="syncstate"></span>
       <button class="btn ghost sm" id="btn-sync">⟳ 刷新</button>
-      <button class="btn ghost sm" title="主题切换" onclick="togglePreset()">🎨</button>
-      <button class="btn ghost sm" onclick="quitApp()">退出</button>
+      <button class="btn ghost sm" id="btn-theme" title="主题切换">🎨</button>
+      <button class="btn ghost sm" id="btn-quit">退出</button>
     </div>
     <div id="content"></div>
   </div>
@@ -280,7 +280,7 @@ function renderAuth(){
     $('auth-err').textContent=''; return;
   }
   body.innerHTML=`<label>账户类型</label>
-    <select id="auth-type" onchange="authTypeChange()">
+    <select id="auth-type">
       <option value="Individual">个人账户</option><option value="Company">企业账户（银行）</option>
       <option value="Country">国家账户</option></select>
     <div id="auth-uid-wrap"></div>
@@ -288,12 +288,13 @@ function renderAuth(){
     <div class="agree" id="auth-agree-wrap"></div>
     <div class="btns"><button class="btn" id="auth-login">登 录</button><button class="btn ghost" id="auth-register">注册新账户</button></div>`;
   authTypeChange();
+  $('auth-type').onchange=authTypeChange;
   $('auth-login').onclick=async()=>{
     const uid=($('auth-uid').value||'').trim(); const pass=$('auth-pass').value;
     if(!uid){ $('auth-err').textContent='请输入或选择账户 UID'; return; }
     if(pass.length<8){ $('auth-err').textContent='密码至少 8 位'; return; }
     if(!agreeChecked()){ $('auth-err').textContent='请先勾选同意《使用协议》与《隐私政策》'; return; }
-    const r=await api('/api/login',{uid,password:pass,agree_terms:true,agree_privacy:true});
+    const r=await api('/api/login',{uid,password:pass,agreeTerms:true,agreePrivacy:true});
     if(r.ok){ view='balance'; await refresh(); toast(r.message); } else { $('auth-err').textContent=r.message; }
   };
   $('auth-register').onclick=()=>openModal('register',{});
@@ -341,14 +342,14 @@ function renderSidebar(){
   MENU.forEach(g=>{
     const open=!!openGroups[g.group];
     html+=`<div class="menu-group ${open?'open':''}" data-group="${esc(g.group)}">
-      <div class="ghead" onclick="toggleGroup('${esc(g.group)}')">${g.icon} ${esc(g.group)}<span class="arw">▸</span></div>
+      <div class="ghead" data-group="${esc(g.group)}">${g.icon} ${esc(g.group)}<span class="arw">▸</span></div>
       <div class="menu-items">`+
       g.items.map(it=>`<div class="menu-item ${view===it.k?'on':''}" data-view="${it.k}"><span class="ic">${it.ic}</span>${esc(it.label)}</div>`).join('')+
       `</div></div>`;
   });
   sb.innerHTML=html;
   sb.querySelectorAll('.menu-item[data-view]').forEach(el=>{ el.onclick=()=>{ view=el.dataset.view; render(); }; });
-  sb.querySelectorAll('.preset').forEach(()=>{});
+  sb.querySelectorAll('.ghead[data-group]').forEach(el=>{ el.onclick=()=>toggleGroup(el.dataset.group); });
 }
 function toggleGroup(name){
   openGroups[name]=!openGroups[name];
@@ -362,6 +363,8 @@ function renderContent(){
   c.innerHTML = fn();
   bindDocLinks(c);
   c.querySelectorAll('button[data-act]').forEach(b=>{ b.onclick=()=>runAction(b.dataset.act, b.dataset); });
+  c.querySelectorAll('.month-head,.day-head').forEach(h=>{ h.onclick=()=>h.parentNode.classList.toggle('open'); });
+  c.querySelectorAll('.preset[data-p]').forEach(el=>{ el.onclick=()=>{ setPreset(el.dataset.p); renderContent(); }; });
   if(view==='inbox') loadInbox();
 }
 
@@ -371,7 +374,7 @@ function renderBalance(){
     <div class="sub">UID ${esc(state.uid)} · ${typeCn(state.atype)}${state.email?(' · '+esc(state.email)):''}</div></div>
     <div class="cards">
       <div class="stat"><div class="k">账户类型</div><div class="v">${typeCn(state.atype)}</div></div>
-      <div class="stat"><div class="k">中心服务器</div><div class="v" style="font-size:14px">${esc(state.server_url||'未配置')}</div></div>
+      <div class="stat"><div class="k">中心服务器</div><div class="v" style="font-size:13px; font-weight:600; line-height:1.4">${esc(state.server_url||'未配置')}</div></div>
       <div class="stat"><div class="k">最近刷新</div><div class="v" style="font-size:15px">${state.synced_at?fmtTs(state.synced_at):'从未'}</div></div>
     </div>
     <div class="panel"><h2>快捷操作</h2><div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -466,12 +469,12 @@ function renderStatement(){
   months.forEach(mon=>{
     const ds=days[mon], dkeys=Object.keys(ds).sort().reverse();
     let inc=0,exp=0,count=0; dkeys.forEach(dk=>ds[dk].forEach(tx=>{count++; const amt=Math.abs(tx.amount); if(tx.dir>=0) inc+=amt; else exp+=amt;}));
-    html+=`<div class="month-row" data-m="${mon}"><div class="month-head" onclick="this.parentNode.classList.toggle('open')">
+    html+=`<div class="month-row" data-m="${mon}"><div class="month-head">
       <span class="mh">${mon}</span><span class="mut">${count} 笔</span><span class="sp"></span>
       <span class="inc num">+${fmt(inc)}</span><span class="exp num">-${fmt(exp)}</span><span class="num">净 ${inc-exp>=0?'+':''}${fmt(inc-exp)}</span></div><div class="month-body">`;
     dkeys.forEach(dk=>{
       const dayTxs=ds[dk]; let dInc=0,dExp=0; dayTxs.forEach(tx=>{ const amt=Math.abs(tx.amount); if(tx.dir>=0) dInc+=amt; else dExp+=amt; });
-      html+=`<div class="day-row" data-d="${dk}"><div class="day-head" onclick="this.parentNode.classList.toggle('open')"><span>${dk}</span><span class="mut">${dayTxs.length} 笔</span><span class="sp"></span><span class="inc">+${fmt(dInc)}</span><span class="exp">-${fmt(dExp)}</span></div><div class="day-items">`;
+      html+=`<div class="day-row" data-d="${dk}"><div class="day-head"><span>${dk}</span><span class="mut">${dayTxs.length} 笔</span><span class="sp"></span><span class="inc">+${fmt(dInc)}</span><span class="exp">-${fmt(dExp)}</span></div><div class="day-items">`;
       dayTxs.forEach(tx=>{ html+=txLine(tx); });
       html+='</div></div>';
     });
@@ -501,7 +504,7 @@ function renderDelete(){
 }
 function renderPersonalize(){
   let html='<div class="panel"><h2>界面个性化</h2><div class="preset-grid">';
-  Object.keys(PRESETS).forEach(p=>{ const colors={cblue:['#0a4f9e','#0a6cd6'],emerald:['#0f7d5a','#16a06e'],wine:['#8f1d3c','#b02348'],noir:['#10131a','#6ea8ff'],navy:['#0d1524','#3d8bfd']}[p]; html+=`<div class="preset ${document.documentElement.getAttribute('data-preset')===p?'on':''}" data-p="${p}" onclick="setPreset('${p}');renderContent()"><div class="dot" style="background:linear-gradient(135deg,${colors[0]},${colors[1]})"></div><div class="n">${PRESETS[p]}</div></div>`; });
+  Object.keys(PRESETS).forEach(p=>{ const colors={cblue:['#0a4f9e','#0a6cd6'],emerald:['#0f7d5a','#16a06e'],wine:['#8f1d3c','#b02348'],noir:['#10131a','#6ea8ff'],navy:['#0d1524','#3d8bfd']}[p]; html+=`<div class="preset ${document.documentElement.getAttribute('data-preset')===p?'on':''}" data-p="${p}"><div class="dot" style="background:linear-gradient(135deg,${colors[0]},${colors[1]})"></div><div class="n">${PRESETS[p]}</div></div>`; });
   html+='</div><p class="muted" style="margin-top:14px">选择后立即生效，并自动保存。顶栏 🎨 按钮可快速轮换主题。</p></div>';
   return html;
 }
@@ -540,12 +543,13 @@ let memberLists = { countries:[], companies:[], systems:[] };
 async function loadMembersCache(){ try{ const r=await api('/api/members'); memberLists={countries:r.countries||[],companies:r.companies||[],systems:r.systems||[]}; }catch(e){ memberLists={countries:[],companies:[],systems:[]}; } }
 function renderRegisterModal(){
   const body=$('modal-body'), err=$('modal-error');
-  body.innerHTML=`<div class="field"><label>账户类型</label><select id="r-type" onchange="regNameField()"><option value="Individual">个人账户</option><option value="Company">企业账户（银行）</option><option value="Country">国家账户</option></select></div>
+  body.innerHTML=`<div class="field"><label>账户类型</label><select id="r-type"><option value="Individual">个人账户</option><option value="Company">企业账户（银行）</option><option value="Country">国家账户</option></select></div>
     <div class="field" id="r-name-wrap"></div><div class="field"><label>邮箱</label><input id="r-email" placeholder="如 Steve@maxshin.top"></div>
     <div class="field"><label>口令（≥8 位，用于签名与登录取回）</label><input id="r-pass" type="password"></div><div class="agree" id="r-agree-wrap"></div>`;
+  $('r-type').onchange=regNameField;
   regNameField(); regAgreeRender(); err.textContent='';
   $('modal-ok').onclick=async()=>{ const uid=($('r-uid').value||'').trim(); if(!regAgreeChecked()){ err.textContent='请先勾选同意《使用协议》与《隐私政策》'; return; }
-    const r=await api('/api/register',{server_url:'',uid,atype:$('r-type').value,email:$('r-email').value,password:$('r-pass').value,agree_terms:true,agree_privacy:true});
+    const r=await api('/api/register',{serverUrl:'',uid,atype:$('r-type').value,email:$('r-email').value,password:$('r-pass').value,agreeTerms:true,agreePrivacy:true});
     if(r.ok){ closeModal(); toast(r.message); view='balance'; refresh(); } else err.textContent=r.message; };
   $('modal-cancel').onclick=closeModal;
 }
@@ -580,7 +584,7 @@ function pendingAction(i, act){
   body.innerHTML=`<p class="muted" style="margin-bottom:12px;">${esc(it.sender)} → 我 · ${esc(it.tx_type)} · <b>${fmt(it.amount)} A€</b>（${fmtTs(it.timestamp)}）</p>
     ${isReject?`<div class="field"><label>拒收原因（可选）</label><input id="f-reason" placeholder="说明拒收原因"></div>`:''}<div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
   ok.textContent=isReject?'确认拒收':'确认接收'; ok.classList.remove('hidden');
-  ok.onclick=async()=>{ const pass=$('f-pass').value; if(pass.length<8){ err.textContent='口令至少 8 位'; return; } const payload={tx_id:it.tx_id,password:pass}; if(isReject) payload.reason=($('f-reason').value||'').trim();
+  ok.onclick=async()=>{ const pass=$('f-pass').value; if(pass.length<8){ err.textContent='口令至少 8 位'; return; } const payload={txId:it.tx_id,password:pass}; if(isReject) payload.reason=($('f-reason').value||'').trim();
     const r=await api(isReject?'/api/reject':'/api/confirm',payload); if(r.ok){ closeModal(); toast(r.message); await refresh(); loadInbox(); } else err.textContent=r.message; };
   cancel.onclick=closeModal;
 }
@@ -627,6 +631,8 @@ async function refresh(){
 
 // ---------- 启动 ----------
 $('doc-close').onclick=closeDoc;
+$('btn-theme').onclick=()=>togglePreset();
+$('btn-quit').onclick=()=>quitApp();
 applyPreset();
 refresh().then(()=>maybeBootUpdate());
 </script>
