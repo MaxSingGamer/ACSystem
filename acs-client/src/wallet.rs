@@ -1,8 +1,10 @@
 //! 本地钱包：元数据、密钥、镜像账户快照与待提交（outbox）的持久化。
 //!
 //! 数据目录 `~/.alpha_dir`，SQLite 本地库（`alpha.db`）+ gpg homedir。
-//! 复用 acs_core 的 LOCAL_SCHEMA（local_ledger/known_pubkeys/keys/login_history/meta），
-//! 另增 client 专用表：`mirror_accounts`（镜像账户快照）与 `outbox`（本地签名待提交）。
+//! 复用 acs_core 的 LOCAL_SCHEMA（known_pubkeys/meta），
+//! 另增 client 专用表：`local_accounts`（历史登录账户，登录界面免输 UID 快捷登录）、
+//! `mirror_accounts`（镜像账户快照）与 `outbox`（本地签名待提交）。
+//! 注：账号相关（uid / 公钥 / 加密私钥）**只存 local_accounts 一张表**，不含任何账目数据。
 
 use std::path::{Path, PathBuf};
 
@@ -26,10 +28,12 @@ CREATE TABLE IF NOT EXISTS mirror_accounts(
 CREATE TABLE IF NOT EXISTS outbox(
     tx_id TEXT PRIMARY KEY, tx_json TEXT NOT NULL, created_at INTEGER NOT NULL,
     state TEXT NOT NULL DEFAULT 'Pending');  -- Pending | Submitted | Failed
--- 本地已登录账户清单（多账户；encrypted_seckey 为密码加密私钥缓存，空=需联网取回）
+-- 历史登录账户（登录界面快捷选择；**唯一一张账户表**，不含账目）
+-- pubkey 仅用于展示与验签，encrypted_seckey 为用户口令加密的私钥（空=需联网向中心取回）
 CREATE TABLE IF NOT EXISTS local_accounts(
     uid TEXT NOT NULL, type TEXT NOT NULL,
-    email TEXT NOT NULL, encrypted_seckey TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '', pubkey TEXT NOT NULL DEFAULT '',
+    encrypted_seckey TEXT NOT NULL DEFAULT '',
     server_url TEXT NOT NULL DEFAULT '', last_login INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(uid, type));
 "#;
@@ -68,13 +72,14 @@ impl WalletInfo {
     }
 }
 
-/// 本地已登录账户（多账户清单中的一项）。
+/// 本地历史登录账户（多账户清单中的一项）。
 #[derive(Debug, Clone)]
 pub struct LocalAccount {
     pub uid: String,
     pub atype: AccountType,
     pub email: String,
-    pub encrypted_seckey: String, // 密码加密私钥缓存（可能为空）
+    pub pubkey: String,           // gpg 公钥（armored），仅展示/验签用
+    pub encrypted_seckey: String, // 密码加密私钥缓存（可能为空，空=需联网取回）
     pub last_login: i64,
 }
 
@@ -100,7 +105,7 @@ fn meta_set(conn: &Connection, k: &str, v: &str) -> rusqlite::Result<()> {
 
 /// 一次性迁移：修正“只按 uid 归属”导致的同名账户串账。
 /// - `mirror_accounts` 旧版主键为 `uid`（同名不同类账户互相覆盖）→ 删除重建为复合主键 `(uid,type)`
-/// - `local_ledger` 可能残留按 uid 误归属的历史（如把铸造交易算成个人支出）→ 清空，待下次同步重建
+/// - `local_ledger`（本地账本副本）已取消 → 直接删除该表（账本改由中心按需提供）
 fn migrate_uid_type(conn: &Connection) -> rusqlite::Result<()> {
     if meta_get(conn, "fix_uidtype_v1").is_some() {
         return Ok(());
@@ -119,14 +124,90 @@ fn migrate_uid_type(conn: &Connection) -> rusqlite::Result<()> {
     }
     // CLIENT_SCHEMA 为幂等 CREATE IF NOT EXISTS，重建被删除的表
     conn.execute_batch(CLIENT_SCHEMA)?;
-    conn.execute_batch("DELETE FROM local_ledger;")?;
+    conn.execute_batch("DROP TABLE IF EXISTS local_ledger;")?;
     meta_set(conn, "fix_uidtype_v1", "1")?;
-    acs_core::log::info("已迁移：账户归属改为 (uid,type)，本地账本缓存已清空");
+    acs_core::log::info("已迁移：账户归属改为 (uid,type)；本地账本副本（local_ledger）已取消");
     Ok(())
 }
 
-fn load_info(conn: &Connection) -> WalletInfo {
-    let atype = meta_get(conn, "wallet_type")
+/// 一次性迁移 v2：账户信息归并到 `local_accounts` 一张表
+/// - `local_accounts` 补列 `pubkey`（登录界面展示历史账户 / 验签用）
+/// - `keys`（旧加密私钥缓存） → 搬入 `local_accounts.encrypted_seckey` 后删表
+/// - `login_history`（旧登录历史） → 已由 `local_accounts.last_login` 取代，删表
+/// 注：**先搬后删**，避免丢掉旧库里唯一一份加密私钥。
+fn migrate_local_v2(conn: &Connection) -> rusqlite::Result<()> {
+    if meta_get(conn, "fix_localacct_v2").is_some() {
+        return Ok(());
+    }
+    // 1) 补 pubkey 列
+    let has_pubkey: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('local_accounts') WHERE name='pubkey'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(true);
+    if !has_pubkey {
+        conn.execute(
+            "ALTER TABLE local_accounts ADD COLUMN pubkey TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    // 2) keys -> local_accounts（仅在本地无缓存时回填）
+    if table_exists(conn, "keys") {
+        conn.execute(
+            "UPDATE local_accounts SET encrypted_seckey=IFNULL((\
+                 SELECT k.encrypted_seckey FROM keys k \
+                 WHERE k.uid=local_accounts.uid AND k.encrypted_seckey<>'' \
+                 ORDER BY k.rowid DESC LIMIT 1), encrypted_seckey) \
+             WHERE encrypted_seckey=''",
+            [],
+        )?;
+        conn.execute("DROP TABLE keys", [])?;
+    }
+    if table_exists(conn, "login_history") {
+        conn.execute("DROP TABLE login_history", [])?;
+    }
+    // known_pubkeys：旧库无主键（可重复写入）→ 重建为 PRIMARY KEY(uid,type)。
+    // 该表是可重新获取的公钥缓存（目前为空），重建不丢数据。
+    if table_exists(conn, "known_pubkeys") && !table_has_pk(conn, "known_pubkeys") {
+        conn.execute("DROP TABLE known_pubkeys", [])?;
+        conn.execute_batch(
+            "CREATE TABLE known_pubkeys(
+                uid TEXT NOT NULL, type TEXT NOT NULL, pubkey TEXT NOT NULL, source TEXT NOT NULL,
+                PRIMARY KEY(uid, type));",
+        )?;
+        acs_core::log::info("已迁移：known_pubkeys 重建为 PRIMARY KEY(uid,type)");
+    }
+    meta_set(conn, "fix_localacct_v2", "1")?;
+    acs_core::log::info("已迁移：账户信息（uid/公钥/加密私钥）统一存于 local_accounts；keys / login_history 已并入");
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+        params![name],
+        |_| Ok(1),
+    )
+    .is_ok()
+}
+
+/// 该表是否已有主键（用于识别老库中缺主键的缓存表）。
+fn table_has_pk(conn: &Connection, name: &str) -> bool {
+    let sql = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            params![name],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_default()
+        .to_uppercase();
+    sql.contains("PRIMARY KEY")
+}
+
+fn load_info(conn: &Connection) -> WalletInfo {    let atype = meta_get(conn, "wallet_type")
         .and_then(|s| AccountType::from_str(&s))
         .unwrap_or(AccountType::Individual);
     WalletInfo {
@@ -150,7 +231,8 @@ impl Wallet {
     pub fn open() -> Result<Wallet> {
         let cfg = CoreConfig::client_default();
         cfg.ensure_dirs()?;
-        // 初始化本次启动的 .alphalog（data_dir 下，文件名 = 启动时间戳）
+        // 把客户端数据目录 .env 注入进程环境（品牌 / 域名等），并初始化本次启动的 .alphalog
+        let _ = acs_core::config::load_env_file(&cfg.data_dir);
         let _ = acs_core::log::init(&cfg.data_dir);
         acs_core::log::info(format!(
             "A€ 钱包启动 v{} 数据目录: {}",
@@ -161,6 +243,7 @@ impl Wallet {
         acs_core::db::init_local(&conn)?;
         conn.execute_batch(CLIENT_SCHEMA)?;
         migrate_uid_type(&conn)?;
+        migrate_local_v2(&conn)?;
 
         let (gpg_bin, _src) = acs_core::gpg_detect::ensure_gpg()
             .map_err(|e| anyhow!("未找到 gpg：{e}"))?;
@@ -171,16 +254,12 @@ impl Wallet {
     }
 
     /// 生成钱包密钥（ed25519）并写入本地，返回密钥信息。
+    /// 注：加密私钥统一由 `save_local_account` 存入 local_accounts（不再写 keys 表）。
     pub fn create_key(&self, uid: &str, email: &str, passphrase: &str) -> Result<GeneratedKey> {
         let gk = self
             .gpg
             .generate_key(&format!("{uid} <{email}>"), passphrase)
             .context("生成钱包密钥失败")?;
-        // 本地 keys 表保存（与中心一致的密码上锁私钥，供恢复/换机导入）
-        self.conn.execute(
-            "INSERT OR REPLACE INTO keys(uid,type,encrypted_seckey) VALUES(?1,?2,?3)",
-            params![uid, "wallet", gk.encrypted_seckey],
-        )?;
         Ok(gk)
     }
 
@@ -242,12 +321,12 @@ impl Wallet {
 
     // ---- 多账户 ----
 
-    /// 列出本地已登录账户（多账户清单，最近登录优先）。
+    /// 列出本地历史登录账户（最近登录优先）。
     pub fn list_local_accounts(&self) -> Vec<LocalAccount> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT uid, type, email, encrypted_seckey, last_login \
+                "SELECT uid, type, email, pubkey, encrypted_seckey, last_login \
                  FROM local_accounts ORDER BY last_login DESC",
             )
             .unwrap();
@@ -258,8 +337,9 @@ impl Wallet {
                     uid: r.get(0)?,
                     atype: AccountType::from_str(&t).unwrap_or(AccountType::Individual),
                     email: r.get(2)?,
-                    encrypted_seckey: r.get(3)?,
-                    last_login: r.get(4)?,
+                    pubkey: r.get(3)?,
+                    encrypted_seckey: r.get(4)?,
+                    last_login: r.get(5)?,
                 })
             })
             .unwrap();
@@ -271,34 +351,40 @@ impl Wallet {
         self.list_local_accounts().into_iter().find(|a| a.uid == uid)
     }
 
-    /// 当前钱包的加密私钥缓存（keys 表，注册时写入）。
+    /// 当前钱包的加密私钥缓存（取自 local_accounts；空=需联网向中心取回）。
     pub fn encrypted_seckey(&self) -> Option<String> {
         self.conn
             .query_row(
-                "SELECT encrypted_seckey FROM keys WHERE uid=?1 ORDER BY rowid DESC LIMIT 1",
-                params![self.info.uid],
-                |r| r.get(0),
+                "SELECT encrypted_seckey FROM local_accounts WHERE uid=?1 AND type=?2",
+                params![self.info.uid, self.info.atype.as_str()],
+                |r| r.get::<_, String>(0),
             )
             .ok()
+            .filter(|s| !s.is_empty())
     }
 
-    /// 保存/更新本地账户（注册或取回后）。
+    /// 保存/更新本地账户（注册、取回密钥或登录后补写公钥时）。
+    #[allow(clippy::too_many_arguments)]
     pub fn save_local_account(
         &self,
         uid: &str,
         atype: AccountType,
         email: &str,
+        pubkey: &str,
         encrypted_seckey: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO local_accounts(uid, type, email, encrypted_seckey, server_url, last_login) \
-             VALUES(?1,?2,?3,?4,?5,?6) \
+            "INSERT INTO local_accounts(uid, type, email, pubkey, encrypted_seckey, server_url, last_login) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7) \
              ON CONFLICT(uid,type) DO UPDATE SET email=excluded.email, \
-               encrypted_seckey=excluded.encrypted_seckey, server_url=excluded.server_url",
+               pubkey=CASE WHEN excluded.pubkey<>'' THEN excluded.pubkey ELSE local_accounts.pubkey END, \
+               encrypted_seckey=CASE WHEN excluded.encrypted_seckey<>'' THEN excluded.encrypted_seckey ELSE local_accounts.encrypted_seckey END, \
+               server_url=excluded.server_url",
             params![
                 uid,
                 atype.as_str(),
                 email,
+                pubkey,
                 encrypted_seckey,
                 self.info.server_url,
                 chrono::Utc::now().timestamp()
@@ -322,8 +408,6 @@ impl Wallet {
             "DELETE FROM local_accounts WHERE uid=?1 AND type=?2",
             params![uid, atype.as_str()],
         )?;
-        self.conn
-            .execute("DELETE FROM keys WHERE uid=?1", params![uid])?;
         Ok(())
     }
 
@@ -340,8 +424,8 @@ impl Wallet {
             meta_set(&self.conn, k, &v)?;
         }
         self.conn.execute(
-            "UPDATE local_accounts SET last_login=?2 WHERE uid=?1",
-            params![uid, chrono::Utc::now().timestamp()],
+            "UPDATE local_accounts SET last_login=?3 WHERE uid=?1 AND type=?2",
+            params![acc.uid, acc.atype.as_str(), chrono::Utc::now().timestamp()],
         )?;
         self.info = load_info(&self.conn);
         Ok(())

@@ -14,6 +14,12 @@ use std::process::{Command, Stdio};
 use crate::errors::{AcsError, Result};
 use crate::models::GeneratedKey;
 
+/// 判断是否为「gpg-agent 仍指向已被删除/替换的 homedir」这类可自愈错误。
+fn is_stale_agent_error(e: &AcsError) -> bool {
+    let s = e.to_string();
+    s.contains("agent_genkey failed") || s.contains("No such file or directory")
+}
+
 #[derive(Clone)]
 pub struct GpgUtil {
     gpg_path: PathBuf,
@@ -93,13 +99,20 @@ impl GpgUtil {
 
     /// 生成 ed25519 密钥对（cert+sign），user_id 形如 `"ID-Type <email>"`。
     /// 返回指纹、armored 公钥、密码上锁的 armored 私钥。
+    ///
+    /// 自愈：gpg-agent 是按 homedir 常驻的，若 homedir 曾被删除/替换而 agent 仍在，
+    /// 会报 `agent_genkey failed: No such file or directory`（用户重装、迁移数据目录或
+    /// 删除钱包后重建时很常见）。此时杀掉该 homedir 的 agent 再重试一次即可。
     pub fn generate_key(&self, user_id: &str, passphrase: &str) -> Result<GeneratedKey> {
         fs::create_dir_all(&self.homedir)?;
-        self.run(
-            &["--quick-generate-key", user_id, "ed25519", "sign"],
-            Some(passphrase),
-            None,
-        )?;
+        let args = ["--quick-generate-key", user_id, "ed25519", "sign"];
+        if let Err(e) = self.run(&args, Some(passphrase), None) {
+            if !is_stale_agent_error(&e) {
+                return Err(e);
+            }
+            self.kill_agent();
+            self.run(&args, Some(passphrase), None)?;
+        }
         let fingerprint = self.fingerprint(user_id)?;
         let pubkey = self.export_public_key(&fingerprint)?;
         let secret = self.export_secret_key(&fingerprint, passphrase)?;
@@ -108,6 +121,19 @@ impl GpgUtil {
             pubkey,
             encrypted_seckey: secret,
         })
+    }
+
+    /// 结束本 homedir 的 gpg-agent（用于清理已失效的常驻 agent）。
+    /// 优先用同目录下的 `gpgconf --homedir <hd> --kill gpg-agent`；失败则忽略（交给重试结果说话）。
+    fn kill_agent(&self) {
+        let conf = self.gpg_path.with_file_name(if cfg!(windows) { "gpgconf.exe" } else { "gpgconf" });
+        let _ = Command::new(conf)
+            .arg("--homedir")
+            .arg(&self.homedir)
+            .args(["--kill", "gpg-agent"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 
     /// 按 User ID 查指纹。

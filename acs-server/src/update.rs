@@ -23,8 +23,12 @@ use crate::api::{ApiErr, ApiResult};
 use crate::state::AppState;
 
 /// GitHub 仓库（更新包官方源；不可达/慢时客户端切服务器下载）。
-const GITHUB_REPO: &str = "MaxSingGamer/ACSystem";
 const MANIFEST_FILE: &str = "update.json";
+
+/// 自动更新源仓库（`owner/repo`，可用 `ACS_UPDATE_REPO` 定制）。
+fn github_repo() -> String {
+    acs_core::brand::brand().update_repo.clone()
+}
 
 // ---- 简单限速（进程内） ----
 type RateMap = Mutex<HashMap<String, Vec<u64>>>;
@@ -33,14 +37,22 @@ fn rate_ip() -> &'static RateMap {
     RATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 const IP_WINDOW_SECS: u64 = 3600;
-const IP_MAX_PER_HOUR: usize = 8;
+
+/// 每小时每 IP 允许的下载次数上限（`ACS_DOWNLOAD_MAX_PER_HOUR`，默认 8）。
+fn ip_max_per_hour() -> usize {
+    std::env::var("ACS_DOWNLOAD_MAX_PER_HOUR")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(8)
+}
 
 fn check_rate(ip: &str) -> bool {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let mut m = rate_ip().lock().unwrap();
     let v = m.entry(ip.to_string()).or_default();
     v.retain(|t| now.saturating_sub(*t) < IP_WINDOW_SECS);
-    if v.len() >= IP_MAX_PER_HOUR {
+    if v.len() >= ip_max_per_hour() {
         return false;
     }
     v.push(now);
@@ -163,7 +175,10 @@ async fn update_info(
     let file = asset.file.clone();
     let server_download = format!("/api/client/update/download?version={}&platform={platform}", m.version);
     let github_download =
-        format!("https://github.com/{GITHUB_REPO}/releases/latest/download/{file}");
+        format!(
+            "https://github.com/{}/releases/latest/download/{file}",
+            github_repo()
+        );
     Ok(Json(json!({
         "ok": true,
         "latest": m.version,
@@ -271,6 +286,6 @@ pub fn routes() -> Router<AppState> {
 
 // 仅供测试/工具引用，避免未使用告警
 #[allow(dead_code)]
-fn _github_repo() -> &'static str {
-    GITHUB_REPO
+fn _github_repo() -> String {
+    github_repo()
 }

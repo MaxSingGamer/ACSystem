@@ -162,13 +162,17 @@ fn privacy() -> String {
 }
 
 /// 按文档名返回完整 HTML。kind: individual-terms / enterprise-terms / privacy
+///
+/// 品牌名/货币符号等由 `crate::brand` 统一替换（见 `.env` 的 `ACS_BRAND_*`），
+/// 使协议文本只需维护一份，换品牌无需改源码。
 pub fn doc_html(kind: &str) -> Option<String> {
-    match kind {
-        "individual-terms" => Some(terms_individual()),
-        "enterprise-terms" => Some(terms_enterprise()),
-        "privacy" => Some(privacy()),
-        _ => None,
-    }
+    let html = match kind {
+        "individual-terms" => terms_individual(),
+        "enterprise-terms" => terms_enterprise(),
+        "privacy" => privacy(),
+        _ => return None,
+    };
+    Some(crate::brand::brand().substitute(&html))
 }
 
 /// 账户类型对应的使用协议文档名（个人与企业不同）。

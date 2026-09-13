@@ -13,8 +13,20 @@ use serde_json::{json, Value};
 
 use crate::wallet::Wallet;
 
-pub const GITHUB_API: &str = "https://api.github.com/repos/MaxSingGamer/ACSystem/releases/latest";
-pub const GITHUB_DL: &str = "https://github.com/MaxSingGamer/ACSystem/releases/latest/download";
+/// 自动更新源（可用 `ACS_UPDATE_REPO=owner/repo` 定制）。
+pub fn github_api() -> String {
+    format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        acs_core::brand::brand().update_repo
+    )
+}
+/// GitHub Releases 下载前缀。
+pub fn github_dl() -> String {
+    format!(
+        "https://github.com/{}/releases/latest/download",
+        acs_core::brand::brand().update_repo
+    )
+}
 
 /// 当前运行平台（与打包命名一致）。
 pub fn platform() -> String {
@@ -62,7 +74,7 @@ fn server_base(w: &Wallet) -> String {
 fn github_latest(plat: &str) -> Option<(String, String, u128)> {
     let t0 = Instant::now();
     let resp = match crate::sync::shared_agent()
-        .get(GITHUB_API)
+        .get(&github_api())
         .set("User-Agent", "ACSystem-Wallet")
         .set("Accept", "application/vnd.github+json")
         .timeout(Duration::from_secs(5))
@@ -243,7 +255,7 @@ pub fn download(w: &Wallet, source: &str, _expected_version: &str) -> Result<Val
             format!("{}{}", server_base(w), p)
         }
     };
-    let github_url = format!("{GITHUB_DL}/{file_name}");
+    let github_url = format!("{}/{file_name}", github_dl());
 
     let updates_dir = downloads_dir(w);
     std::fs::create_dir_all(&updates_dir)?;

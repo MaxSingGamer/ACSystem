@@ -17,8 +17,21 @@ use tauri::Manager;
 
 use crate::wallet::Wallet;
 
-/// 默认中心服务器地址（未配置时使用）。
-pub const DEFAULT_SERVER: &str = "https://acsystem.maxshin.top";
+/// 默认中心服务器地址：优先运行时环境变量 `ACS_PUBLIC_URL`，
+/// 其次构建时注入的同名变量（`option_env!`），最后回退到品牌默认值（`.env` 的 `ACS_PUBLIC_URL`）。
+pub fn default_server() -> String {
+    if let Ok(v) = std::env::var("ACS_PUBLIC_URL") {
+        if !v.trim().is_empty() {
+            return v.trim().trim_end_matches('/').to_string();
+        }
+    }
+    if let Some(v) = option_env!("ACS_PUBLIC_URL") {
+        if !v.trim().is_empty() {
+            return v.trim().trim_end_matches('/').to_string();
+        }
+    }
+    acs_core::brand::brand().public_url.trim_end_matches('/').to_string()
+}
 
 /// 跨 command 共享的钱包。
 pub struct AppState {
@@ -56,14 +69,27 @@ fn mask_uid(s: &str) -> String {
 // ---------- 基础命令 ----------
 
 /// 当前登录态与账户信息。
-/// v3.1.0：不再返回本地登录记录（登录界面不展示历史账户）；仅提供当前登录者信息。
+/// v3.1.0：额外返回本机历史登录账户（uid/类型/邮箱/公钥/最近登录），
+/// 供登录界面免输 UID 快捷选择；**不返回加密私钥**（解密与导入均在 Rust 侧完成）。
 #[tauri::command]
 fn state(state: tauri::State<AppState>) -> CmdResult<serde_json::Value> {
     log::call("state");
     let w = state.wallet.lock().map_err(err).unwrap();
     let logged_in = w.info.initialized();
-    let txs = crate::txn::list_local_tx(&w, 200);
     let outbox = crate::txn::list_outbox(&w);
+    let accounts: Vec<serde_json::Value> = w
+        .list_local_accounts()
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({
+                "uid": a.uid,
+                "type": a.atype.as_str(),
+                "email": a.email,
+                "pubkey": a.pubkey,
+                "last_login": a.last_login,
+            })
+        })
+        .collect();
     let r = serde_json::json!({
         "logged_in": logged_in,
         "uid": mask_uid(&w.info.uid),
@@ -72,11 +98,21 @@ fn state(state: tauri::State<AppState>) -> CmdResult<serde_json::Value> {
         "server_url": w.info.server_url,
         "synced_at": w.info.synced_at,
         "balance": w.mirror_balance(),
-        "txs": txs,
         "outbox": outbox,
+        "accounts": accounts,
     });
     log::out(&format!("state logged_in={logged_in}"));
     Ok(r)
+}
+
+/// 账本：按需从中心拉取“本账户”的流水（**不在本地保存副本**）。
+#[tauri::command]
+fn ledger(state: tauri::State<AppState>) -> CmdResult<serde_json::Value> {
+    run("ledger", "", || {
+        let w = state.wallet.lock().map_err(err).unwrap();
+        let txs = crate::sync::fetch_ledger(&w).map_err(err)?;
+        Ok(serde_json::json!({ "ok": true, "txs": txs }))
+    })
 }
 
 /// 登录：本地缓存取回或向中心 fetch-key。
@@ -382,6 +418,23 @@ fn reveal(path: String) -> CmdResult<serde_json::Value> {
 
 // ---------- 入口 ----------
 
+/// 品牌与部署元信息（界面按 `.env` 的 `ACS_BRAND_*` / `ACS_PUBLIC_URL` 定制显示）。
+/// 与 Service 端 `/api/brand` 同源（同一个 `acs_core::brand`）。
+#[tauri::command]
+fn brand() -> CmdResult<serde_json::Value> {
+    let b = acs_core::brand::brand();
+    Ok(serde_json::json!({
+        "ok": true,
+        "name": b.name,
+        "currency": b.currency,
+        "system_name": b.system_name,
+        "client_app": b.client_app,
+        "union_abbr": b.union_abbr,
+        "public_url": b.public_url,
+        "admin_url": b.admin_url,
+    }))
+}
+
 /// 启动 Tauri 应用（入口）。
 pub fn app_main() {
     tauri::Builder::default()
@@ -389,9 +442,9 @@ pub fn app_main() {
             wallet: Mutex::new(Wallet::open().expect("打开钱包失败")),
         })
         .invoke_handler(tauri::generate_handler![
-            state, login, register, logout, sync_now, transfer, pending, confirm, reject,
+            state, ledger, login, register, logout, sync_now, transfer, pending, confirm, reject,
             set_server, delete_account, members, legal_doc, check_update, download_update,
-            reveal, quit,
+            reveal, quit, brand,
         ])
         .build(tauri::generate_context!())
         .expect("启动 Tauri 应用失败")

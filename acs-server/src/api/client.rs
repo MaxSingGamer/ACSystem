@@ -133,9 +133,7 @@ pub struct OpenReq {
     pub email: String,
     pub pubkey: String,
     #[serde(default)]
-    pub encrypted_seckey: String, // 密码加密私钥（登录取回用）
-    #[serde(default)]
-    pub password_hash: String,    // $salt$sha256（客户端注册时上传）
+    pub encrypted_seckey: String, // 密码加密私钥（登录取回用；口令不落库）
     #[serde(default)]
     pub agree_terms: bool,        // 是否同意《使用协议》
     #[serde(default)]
@@ -209,29 +207,24 @@ async fn open_account(
         changed_at: now,
     };
     account::create_account(&conn, &acc)?;
-    // 存登录凭证（客户端注册时提供密码哈希；供登录取回）
-    // v3.1.0：凡创建登录凭证（即最终用户自助注册）须先同意《使用协议》/《隐私政策》，
-    // 未同意 → 服务端直接驳回。无密码哈希（开发/系统预置流程）不涉登录，不强制。
-    if !req.password_hash.trim().is_empty() {
-        if !req.agree_terms || !req.agree_privacy {
-            return Err(ApiErr::forbidden("注册须先同意《使用协议》与《隐私政策》"));
-        }
-        conn.execute(
-            "INSERT INTO account_credentials(uid, type, password_hash, last_login, agree_terms, agree_privacy) \
-             VALUES (?1,?2,?3,?4,?5,?6) \
-             ON CONFLICT(uid,type) DO UPDATE SET password_hash=excluded.password_hash, \
-               agree_terms=excluded.agree_terms, agree_privacy=excluded.agree_privacy",
-            params![
-                acc.uid.clone(),
-                atype.as_str(),
-                req.password_hash.trim(),
-                now.timestamp(),
-                i64::from(req.agree_terms),
-                i64::from(req.agree_privacy)
-            ],
-        )
-        .map_err(ApiErr::from_err)?;
+    // 注册须先同意《使用协议》/《隐私政策》（服务端二次校验并记录同意标识）。
+    // 注：不保存任何口令哈希——私钥本身由用户口令加密（GPG S2K），口令不落库、不传输。
+    if !req.agree_terms || !req.agree_privacy {
+        return Err(ApiErr::forbidden("注册须先同意《使用协议》与《隐私政策》"));
     }
+    conn.execute(
+        &format!(
+            "UPDATE {} SET last_login=?2, agree_terms=?3, agree_privacy=?4 WHERE uid=?1",
+            atype.table_name()
+        ),
+        params![
+            acc.uid.clone(),
+            now.timestamp(),
+            i64::from(req.agree_terms),
+            i64::from(req.agree_privacy)
+        ],
+    )
+    .map_err(ApiErr::from_err)?;
     Ok(Json(json!({ "ok": true, "uid": acc.uid, "type": atype.as_str(), "fingerprint": fp, "balance": 0 })))
 }
 
@@ -242,14 +235,82 @@ pub struct FetchKeyReq {
     pub uid: String,
     #[serde(rename = "type", default)]
     pub atype: String, // 可空：空则按 UID 在所有账户类型中自动匹配
-    pub password: String,
     #[serde(default)]
     pub agree_terms: bool,   // 是否已同意《使用协议》
     #[serde(default)]
     pub agree_privacy: bool, // 是否已同意《隐私政策》
 }
 
-/// 客户端登录：验证密码哈希，返回加密私钥与账户信息（供本机缓存或跨设备恢复）。
+/// `fetch-key` 限流：单账户每小时上限（`ACS_FETCH_KEY_MAX_PER_HOUR`，默认 10）。
+fn fetch_key_max_per_account() -> usize {
+    std::env::var("ACS_FETCH_KEY_MAX_PER_HOUR")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(10)
+}
+
+/// `fetch-key` 限流：全局每小时上限（`ACS_FETCH_KEY_GLOBAL_MAX_PER_HOUR`，默认 2000）。
+/// 用于拦住「换 uid 批量枚举」——单账户限额拦不住这种遍历。
+fn fetch_key_max_global() -> usize {
+    std::env::var("ACS_FETCH_KEY_GLOBAL_MAX_PER_HOUR")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(2000)
+}
+
+/// 限流窗口（秒）。
+const FETCH_WINDOW_SECS: i64 = 3600;
+
+/// 全局限流计数器在 key_fetch_hits 中的保留键（uid 不可能为它）。
+const FETCH_GLOBAL_KEY: &str = "__all__";
+
+/// 检查并记录一次 `fetch-key` 请求；超限返回 429。
+///
+/// 注：窗口为内存态（重启清零）。因服务端通常在反向代理（frp）之后、真实客户端 IP
+/// 不可得，故不按 IP 限流，而是「单账户 + 全局」双窗口。
+fn check_fetch_rate(st: &AppState, uid: &str) -> Result<(), ApiErr> {
+    let per_max = fetch_key_max_per_account();
+    let global_max = fetch_key_max_global();
+    let now = chrono::Utc::now().timestamp();
+    let mut hits = st.key_fetch_hits.lock().unwrap();
+
+    // 防内存膨胀：条目过多时清理已过期的 key（全局键始终保留）
+    if hits.len() > 5_000 {
+        hits.retain(|k, v| {
+            v.retain(|t| now - *t < FETCH_WINDOW_SECS);
+            k == FETCH_GLOBAL_KEY || !v.is_empty()
+        });
+    }
+
+    {
+        let g = hits.entry(FETCH_GLOBAL_KEY.to_string()).or_default();
+        g.retain(|t| now - *t < FETCH_WINDOW_SECS);
+        if g.len() >= global_max {
+            return Err(ApiErr::too_many_requests(
+                "服务端密钥取回请求过于频繁，请稍后再试",
+            ));
+        }
+        g.push(now);
+    }
+    {
+        let per = hits.entry(uid.to_string()).or_default();
+        per.retain(|t| now - *t < FETCH_WINDOW_SECS);
+        if per.len() > per_max {
+            return Err(ApiErr::too_many_requests(format!(
+                "该账户取回密钥过于频繁（每小时上限 {per_max} 次），请稍后再试"
+            )));
+        }
+        per.push(now);
+    }
+    Ok(())
+}
+
+/// 客户端登录：按 uid/type 返回加密私钥与账户信息（供本机缓存或跨设备恢复）。
+/// **服务端不保存、不接收、不校验任何口令材料**：私钥由用户口令加密（GPG S2K），
+/// 客户端本地用口令解开即完成校验。正因如此，返回密文的唯一凭据就是 uid ——
+/// 故此处必须限流防枚举（见 `check_fetch_rate`：单账户 + 全局双窗口，环境变量可调）。
 /// v3.1.0：登录请求须携带协议同意标识；未同意则服务端拒绝（客户端也应前置拦截）。
 async fn fetch_key(
     State(st): State<AppState>,
@@ -258,6 +319,7 @@ async fn fetch_key(
     if !req.agree_terms || !req.agree_privacy {
         return Err(ApiErr::forbidden("登录须先同意《使用协议》与《隐私政策》"));
     }
+    check_fetch_rate(&st, &req.uid)?;
     // 类型：指定则单类型；否则按 UID 在全部账户类型中自动匹配
     let atypes: Vec<AccountType> = if req.atype.trim().is_empty() {
         vec![
@@ -272,23 +334,12 @@ async fn fetch_key(
         vec![t]
     };
     let conn = st.db.lock().unwrap();
-    let mut last_err: Option<ApiErr> = None;
     for atype in atypes {
-        let stored: Option<(String, i64)> = conn
-            .query_row(
-                "SELECT password_hash, agree_terms FROM account_credentials WHERE uid=?1 AND type=?2",
-                params![req.uid, atype.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok();
-        let Some((stored, _agreed)) = stored else { continue };
-        let (salt, hash) = stored.split_once('$').unwrap_or(("", &stored));
-        if crate::auth::hash_password(&req.password, salt) != hash {
-            last_err = Some(ApiErr::forbidden("密码错误"));
+        // 不再校验口令哈希：私钥本身由用户口令加密（GPG S2K），"能否解开"即口令是否正确的唯一判据。
+        // 这里只确认该类型下账户存在且可用，然后返回其加密私钥。
+        let Some(acc) = account::get_account(&conn, &req.uid, atype)? else {
             continue;
-        }
-        let acc = account::get_account(&conn, &req.uid, atype)?
-            .ok_or_else(|| ApiErr::not_found("账户不存在"))?;
+        };
         if acc.status != AccountStatus::Active {
             return Err(ApiErr::forbidden("该账户已注销/冻结，无法登录"));
         }
@@ -298,21 +349,28 @@ async fn fetch_key(
                 "系统账本账户请通过 Server 管理后台「系统账本账户登录」操作，客户端已取消系统账户登录",
             ));
         }
-        // 更新上次登录时间
+        // 记录最近登录时间与协议同意标识（不涉及口令）
         let _ = conn.execute(
-            "UPDATE account_credentials SET last_login=?1 WHERE uid=?2 AND type=?3",
-            params![chrono::Utc::now().timestamp(), req.uid, atype.as_str()],
+            &format!(
+                "UPDATE {} SET last_login=?1, agree_terms=?2, agree_privacy=?3 WHERE uid=?4",
+                atype.table_name()
+            ),
+            params![
+                chrono::Utc::now().timestamp(),
+                i64::from(req.agree_terms),
+                i64::from(req.agree_privacy),
+                req.uid
+            ],
         );
         return Ok(Json(json!({
             "ok": true,
             "uid": acc.uid,
             "type": atype.as_str(),
             "email": acc.email,
-            "pubkey": acc.pubkey,
             "encrypted_seckey": acc.encrypted_seckey,
         })));
     }
-    Err(last_err.unwrap_or_else(|| ApiErr::not_found("该账户未设置登录凭证（需客户端注册时开启）")))
+    Err(ApiErr::not_found("账户不存在"))
 }
 
 // ---------- 提交交易 ----------
@@ -326,13 +384,25 @@ async fn submit(
     State(st): State<AppState>,
     Json(req): Json<SubmitReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let tx = req.tx;
+    let mut tx = req.tx;
 
     // 1) 校验 tx_hash 一致（防篡改）
     let expect = transaction::compute_tx_hash(&tx);
     if tx.tx_hash != expect {
         return Err(ApiErr::bad_request("交易哈希不一致（tx 被篡改）"));
     }
+
+    // 2) 校验客户端时间戳。ts 由客户端自填且参与 tx_hash，不校验等于账本时间轴可被任意伪造；
+    //    权威时间另存 received_at（服务端时钟，客户端无法影响）。
+    //    容忍度：未来 5 分钟（时钟误差）、历史 7 天（客户端出件箱可能延后重试提交）。
+    let now = chrono::Utc::now().timestamp();
+    if tx.timestamp > now + 300 {
+        return Err(ApiErr::bad_request("交易时间戳超出允许范围（客户端时钟可能不准）"));
+    }
+    if tx.timestamp < now - 7 * 86_400 {
+        return Err(ApiErr::bad_request("交易时间戳过于陈旧（请校准客户端时钟后重试）"));
+    }
+    tx.received_at = now;
 
     // 3) 校验发送方存在 + 公钥签名
     let (sender_pub, sender_atype) = {
@@ -360,9 +430,10 @@ async fn submit(
         let _ = sender_atype;
     }
 
-    // 5) 提交（Pending + tx_confirmations）；提交前先重算余额，保证“发送方余额足够”判断准确
+    // 5) 提交（Pending）；提交前只重算「发送方」余额，保证余额判断准确
+    //    （全量重算代价高且会长时间持有全局库锁，交由 /api/sync 低频触发）
     let mut conn = st.db.lock().unwrap();
-    acs_core::account::recompute_all_balances(&conn)?;
+    acs_core::account::recompute_account(&conn, &tx.sender, tx.sender_type)?;
     transaction::submit_tx(&mut conn, &tx)?;
     Ok(Json(json!({ "ok": true, "tx_id": tx.tx_id, "status": "Pending" })))
 }
@@ -408,7 +479,7 @@ async fn confirm(
             Ok(Json(json!({ "ok": true, "tx_id": req.tx_id, "status": "Rejected" })))
         }
         _ => {
-            transaction::confirm_tx(&mut conn, &req.tx_id, &receiver, rtype)?;
+            transaction::confirm_tx(&mut conn, &req.tx_id, &receiver, rtype, &req.receiver_sig)?;
             Ok(Json(json!({ "ok": true, "tx_id": req.tx_id, "status": "Confirmed" })))
         }
     }

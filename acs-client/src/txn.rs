@@ -103,41 +103,8 @@ pub fn build_and_submit_transfer(
     client_api::submit_signed_tx(w, &tx_id)
 }
 
-/// 列出本地交易历史（本地账本，仅与本账户相关）。方向：+1 收 / -1 支 / 0 未知。
-pub fn list_local_tx(
-    w: &Wallet,
-    limit: usize,
-) -> Vec<(String, String, String, String, i64, i64, String, i64)> {
-    let uid = w.info.uid.clone();
-    let mut stmt = w
-        .conn
-        .prepare(
-            "SELECT tx_id, tx_type, peer, peer_type, amount, ts, status, direction \
-             FROM local_ledger \
-             WHERE sender=?1 OR receiver=?1 OR peer=?1 \
-             ORDER BY ts DESC LIMIT ?2",
-        )
-        .unwrap();
-    let rows = stmt
-        .query_map(params![uid, limit as i64], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, i64>(7)?,
-            ))
-        })
-        .unwrap();
-    let mut out = Vec::new();
-    for r in rows.flatten() {
-        out.push(r);
-    }
-    out
-}
+// 注：客户端已取消本地账本副本（local_ledger）。交易历史改为按需从中心拉取，
+// 见 `sync::fetch_ledger()`；不再提供本地 list_local_tx()。
 
 /// 列出 outbox 待提交。
 pub fn list_outbox(w: &Wallet) -> Vec<(String, String, i64)> {

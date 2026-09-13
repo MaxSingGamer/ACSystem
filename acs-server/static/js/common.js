@@ -1,6 +1,8 @@
-// 公共：API 封装、令牌、格式化、字符徽标（A€）、退出、提示、明暗主题。
-// 徽标：直接使用 A€ 字符，配合 .logo 的渐变方形样式呈现（无 SVG/图片依赖）。
-const LOGO_BADGE = 'A€';
+// 公共：API 封装、令牌、格式化、字符徽标、退出、提示、明暗主题、品牌化。
+// 徽标：默认使用货币符号字符，配合 .logo 的渐变方形样式呈现（无 SVG/图片依赖）。
+let LOGO_BADGE = 'A€';
+/// 品牌配置：由 `/api/brand` 注入（服务端 `.env` 的 `ACS_BRAND_*`），未获取前用默认值。
+let BRAND = { name: 'Alpha Coin', currency: 'A€', system_name: 'Alpha Coin System', union_abbr: 'AEU' };
 
 let TOKEN = localStorage.getItem('acs_token') || '';
 
@@ -34,7 +36,33 @@ const fmt = n => (n ?? 0).toLocaleString();
 const fmtA = n => fmt(Math.round((n ?? 0) * 100) / 100);
 const typeName = t => ({ System: '系统', Company: '企业', Country: '国家', Individual: '个人' }[t] || t);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const tsFmt = s => s ? new Date(s * 1000).toLocaleString('zh-CN', { hour12: false }) : '-';
+const tsFmt = s => s ? new Date(s * 1000).toLocaleString('zh-CN', { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+
+// ---------- 品牌化：ACS_BRAND_* → 界面文案 ----------
+/// 替换品牌串（长串优先，避免部分替换）。
+function brandSwap(text, b) {
+  return String(text)
+    .replace(/Alpha Coin System/g, b.system_name || 'Alpha Coin System')
+    .replace(/Alpha Coin/g, b.name || 'Alpha Coin')
+    .replace(/A€/g, b.currency || 'A€');
+}
+async function applyBrand() {
+  try {
+    const b = await api('/api/brand');
+    if (!b || b.ok === false) return;
+    BRAND = b;
+    LOGO_BADGE = b.currency || LOGO_BADGE;
+    document.title = brandSwap(document.title, b);
+    // 只改「品牌容器」里的静态文本节点，不碰动态生成的业务内容
+    document.querySelectorAll('.brand').forEach(el => {
+      el.childNodes.forEach(n => { if (n.nodeType === 3) n.textContent = brandSwap(n.textContent, b); });
+    });
+    document.querySelectorAll('.logo, .brand-mark').forEach(el => {
+      if (el.textContent.trim() === 'A€') el.textContent = b.currency || 'A€';
+    });
+  } catch (e) { /* 品牌获取失败不影响任何功能 */ }
+}
+window.addEventListener('load', () => applyBrand());
 
 function msg(id, text) {
   const el = $(id);

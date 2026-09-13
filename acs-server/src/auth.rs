@@ -7,46 +7,55 @@ use axum::Json;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use acs_core::errors::Result as CoreResult;
 use acs_core::gpg::GpgUtil;
 use acs_core::models::{AdminRole, GeneratedKey};
 
 use crate::api::{ApiErr, ApiResult};
+use crate::password;
 use crate::state::{AppState, LoginFail, Session};
 
-/// sha256(salt:password) 十六进制（仅存哈希）。
-pub fn hash_password(password: &str, salt: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(salt.as_bytes());
-    h.update(b":");
-    h.update(password.as_bytes());
-    hex::encode(h.finalize())
-}
-
-/// 常量时间比较（防时序攻击）：等长字符串逐字节异或，不因首个差异提前返回。
-fn ct_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
-
+/// 口令哈希与校验统一走 [`crate::password`]：
+/// PBKDF2-HMAC-SHA256（60 万轮 + 随机盐），旧版单轮 SHA-256 仍可校验并在登录成功后自动升级。
+///
 /// 登录失败次数上限（达到后锁定账户）。
 const MAX_LOGIN_FAILS: u32 = 5;
 /// 锁定基础时长（秒）；每多超一次倍增，封顶 LOCK_MAX_SECS。
 const LOCK_BASE_SECS: i64 = 30;
 const LOCK_MAX_SECS: i64 = 300;
 
+/// 记录一次管理员登录失败（**持久化**到 admins 表，重启不会清零）。
+/// 达到上限后指数退避锁定，封顶 `LOCK_MAX_SECS`。
+fn register_admin_fail(st: &AppState, id: i64, uid: &str, now: i64) {
+    let conn = st.db.lock().unwrap();
+    let cnt: i64 = conn
+        .query_row(
+            "SELECT fail_count+1 FROM admins WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or(1);
+    let locked = if cnt >= MAX_LOGIN_FAILS as i64 {
+        let over = cnt - MAX_LOGIN_FAILS as i64 + 1;
+        now + (LOCK_BASE_SECS * over).min(LOCK_MAX_SECS)
+    } else {
+        0
+    };
+    let _ = conn.execute(
+        "UPDATE admins SET fail_count=?1, locked_until=?2 WHERE id=?3",
+        params![cnt, locked, id],
+    );
+    if locked > now {
+        crate::log::err(format!(
+            "管理员口令连续失败已锁定：{uid}（{} 秒）",
+            locked - now
+        ));
+    }
+}
+
 /// 记录一次登录失败：达到上限后对账户设置锁定截止时间（指数退避）。
-fn register_fail(st: &AppState, uid: &str, now: i64) {
+pub(crate) fn register_fail(st: &AppState, uid: &str, now: i64) {
     let mut fails = st.login_fails.lock().unwrap();
     let e = fails
         .entry(uid.to_string())
@@ -56,11 +65,22 @@ fn register_fail(st: &AppState, uid: &str, now: i64) {
         let over = (e.count - MAX_LOGIN_FAILS + 1) as i64;
         let secs = (LOCK_BASE_SECS * over).min(LOCK_MAX_SECS);
         e.locked_until = now + secs;
+        // 锁定事件写文件日志：便于运维发现「有人在盯这个账号」
+        crate::log::err(format!("口令连续失败已锁定：{uid}（{secs} 秒）"));
     }
     // 防止表无限膨胀：超过阈值时清理已过期的记录。
     if fails.len() > 10_000 {
         fails.retain(|_, f| f.locked_until > now);
     }
+}
+
+/// 若 `key` 处于锁定中，返回剩余秒数（供登录与系统账本代管登录共用）。
+pub(crate) fn lock_wait(st: &AppState, key: &str, now: i64) -> Option<i64> {
+    let fails = st.login_fails.lock().unwrap();
+    fails
+        .get(key)
+        .filter(|f| f.locked_until > now)
+        .map(|f| f.locked_until - now)
 }
 
 #[derive(Deserialize)]
@@ -88,22 +108,13 @@ pub async fn login(
     Json(req): Json<LoginReq>,
 ) -> ApiResult<Json<LoginResp>> {
     let now = Utc::now().timestamp();
-    // 暴力破解防护：账户已被锁定时直接拒绝。
-    {
-        let fails = st.login_fails.lock().unwrap();
-        if let Some(f) = fails.get(&req.uid) {
-            if f.locked_until > now {
-                let wait = f.locked_until - now;
-                return Err(ApiErr::too_many_requests(format!(
-                    "尝试过于频繁，请 {wait} 秒后重试"
-                )));
-            }
-        }
-    }
-    let conn = st.db.lock().unwrap();
-    let row: Option<(i64, String, String, bool)> = conn
-        .query_row(
-            "SELECT id, role, password_hash, must_change_password FROM admins \
+    // 读账户行（锁只持有一瞬）：下面的 PBKDF2 校验在锁外做，
+    // 否则单次登录会把全局库锁占住 0.2–0.5 秒，阻塞所有其他请求。
+    // 失败计数/锁定时间取自数据库（持久化，重启不清零）。
+    let row: Option<(i64, String, String, bool, i64)> = {
+        let conn = st.db.lock().unwrap();
+        conn.query_row(
+            "SELECT id, role, password_hash, must_change_password, locked_until FROM admins \
              WHERE uid=?1 AND status='Active'",
             params![req.uid.clone()],
             |r| {
@@ -112,22 +123,42 @@ pub async fn login(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, bool>(3)?,
+                    r.get::<_, i64>(4)?,
                 ))
             },
         )
         .optional()
-        .map_err(ApiErr::from_err)?;
-    let Some((id, role, pw_hash, must_change)) = row else {
-        register_fail(&st, &req.uid, now);
+        .map_err(ApiErr::from_err)?
+    };
+    let Some((id, role, pw_hash, must_change, locked_until)) = row else {
+        // 账号不存在 / 已停用：不回具体原因（防枚举），只记日志
+        crate::log::err(format!("后台登录失败（账号不存在或已停用）：uid={}", req.uid));
         return Err(ApiErr::unauthorized("账号或密码错误"));
     };
-    let (salt, stored) = pw_hash.split_once('$').unwrap_or(("", &pw_hash));
-    if !ct_eq(&hash_password(&req.password, salt), stored) {
-        register_fail(&st, &req.uid, now);
+    if locked_until > now {
+        return Err(ApiErr::too_many_requests(format!(
+            "尝试过于频繁，请 {} 秒后重试",
+            locked_until - now
+        )));
+    }
+    if !password::verify(&req.password, &pw_hash) {
+        register_admin_fail(&st, id, &req.uid, now);
         return Err(ApiErr::unauthorized("账号或密码错误"));
     }
-    // 登录成功：清空该账户的失败记录。
-    st.login_fails.lock().unwrap().remove(&req.uid);
+    // 登录成功：清零失败记录
+    let conn = st.db.lock().unwrap();
+    let _ = conn.execute(
+        "UPDATE admins SET fail_count=0, locked_until=0 WHERE id=?1",
+        params![id],
+    );
+    // 旧格式（单轮 SHA-256）或迭代次数不足 → 此刻口令明文可得，顺手升级为 PBKDF2
+    if password::needs_rehash(&pw_hash) {
+        let _ = conn.execute(
+            "UPDATE admins SET password_hash=?1 WHERE id=?2",
+            params![password::hash(&req.password), id],
+        );
+        crate::log::info(format!("管理员口令哈希已升级为 PBKDF2：uid={}", req.uid));
+    }
     let role = AdminRole::from_str(&role).ok_or_else(|| ApiErr::internal("后台角色配置异常"))?;
     // 记录管理员上次登录时间（复用已持有的 conn：std::sync::Mutex 不可重入，二次 lock 会自死锁）
     let _ = conn.execute(
@@ -284,8 +315,7 @@ pub async fn change_password(
         }
     };
 
-    let salt = uuid::Uuid::new_v4().to_string();
-    let new_hash = format!("{salt}${}", hash_password(&req.new_password, &salt));
+    let new_hash = password::hash(&req.new_password);
 
     // 密钥 passphrase 联动
     // - root 重置他人：旧 passphrase 不可知 → 用新密码重建密钥
@@ -294,7 +324,7 @@ pub async fn change_password(
     let new_key_enc = if regenerate {
         let gk = st
             .gpg
-            .generate_key(&format!("{target_uid} <{target_uid}@aeu.admin>"), &req.new_password)
+            .generate_key(&acs_core::brand::brand().admin_gpg_uid(&target_uid), &req.new_password)
             .map_err(ApiErr::from)?;
         conn.execute(
             "UPDATE admins SET pubkey=?1, encrypted_seckey=?2, fingerprint=?3, key_passphrase_enc=?4 WHERE id=?5",
@@ -350,7 +380,7 @@ pub fn ensure_admin_keys(conn: &rusqlite::Connection, gpg: &GpgUtil, id: i64, ui
         return Ok(());
     }
     let gk: GeneratedKey = gpg
-        .generate_key(&format!("{uid} <{uid}@aeu.admin>"), login_pwd)?;
+        .generate_key(&acs_core::brand::brand().admin_gpg_uid(uid), login_pwd)?;
     let key_enc = crate::crypto::encrypt_secret(login_pwd, login_pwd);
     conn.execute(
         "UPDATE admins SET pubkey=?1, encrypted_seckey=?2, fingerprint=?3, key_passphrase_enc=?4 WHERE id=?5",
@@ -377,7 +407,7 @@ fn admin_row(conn: &rusqlite::Connection, uid: &str) -> Option<(i64, AdminRole, 
     .flatten()
 }
 
+/// 校验存量哈希（兼容旧格式）。
 fn verify_hash(stored: &str, password: &str) -> bool {
-    let (salt, hash) = stored.split_once('$').unwrap_or(("", stored));
-    hash_password(password, salt) == hash
+    password::verify(password, stored)
 }

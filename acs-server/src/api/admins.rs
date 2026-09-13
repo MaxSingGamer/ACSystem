@@ -14,9 +14,10 @@ use serde_json::json;
 
 use acs_core::models::AdminRole;
 
-use crate::api::audit::log_audit;
+use crate::api::audit::{log_audit, with_audit};
 use crate::api::{ApiErr, ApiResult};
-use crate::auth::{hash_password, AuthUser};
+use crate::auth::AuthUser;
+use crate::password;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -80,8 +81,7 @@ async fn create_admin(
         .ok_or_else(|| ApiErr::bad_request("角色无效"))?;
 
     let conn = st.db.lock().unwrap();
-    let salt = uuid::Uuid::new_v4().to_string();
-    let pw_hash = format!("{salt}${}", hash_password(&req.password, &salt));
+    let pw_hash = password::hash(&req.password);
     conn.execute(
         "INSERT INTO admins(uid, role, password_hash, must_change_password, pubkey, encrypted_seckey, fingerprint, key_passphrase_enc, status, created_at) \
          VALUES (?1,?2,?3,1,'','','','','Active',?4)",
@@ -109,7 +109,7 @@ async fn delete_admin(
     if id == auth.admin_id {
         return Err(ApiErr::bad_request("不能删除自己"));
     }
-    let conn = st.db.lock().unwrap();
+    let mut conn = st.db.lock().unwrap();
     let row: Option<(i64, String)> = conn
         .query_row("SELECT id, role FROM admins WHERE id=?1", params![id], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -122,8 +122,11 @@ async fn delete_admin(
     if AdminRole::from_str(&role) == Some(AdminRole::Root) {
         return Err(ApiErr::forbidden("同级别（根管理员）不可互相删除"));
     }
-    conn.execute("DELETE FROM admins WHERE id=?1", params![id]).map_err(ApiErr::from_err)?;
-    log_audit(&conn, &auth.username, "delete_admin", &format!("id={id}"));
+    with_audit(&mut conn, &auth.username, "delete_admin", &format!("id={id}"), |c| {
+        c.execute("DELETE FROM admins WHERE id=?1", params![id])
+            .map_err(ApiErr::from_err)?;
+        Ok(())
+    })?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -139,7 +142,7 @@ async fn set_enabled(
     if id == auth.admin_id {
         return Err(ApiErr::bad_request("不能停用自己"));
     }
-    let conn = st.db.lock().unwrap();
+    let mut conn = st.db.lock().unwrap();
     let row: Option<(i64, String)> = conn
         .query_row("SELECT id, role FROM admins WHERE id=?1", params![id], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -153,9 +156,12 @@ async fn set_enabled(
         return Err(ApiErr::forbidden("同级别（根管理员）不可停用"));
     }
     let status = if enable { "Active" } else { "Disabled" };
-    conn.execute("UPDATE admins SET status=?1 WHERE id=?2", params![status, id])
-        .map_err(ApiErr::from_err)?;
-    log_audit(&conn, &auth.username, if enable { "enable_admin" } else { "disable_admin" }, &format!("id={id}"));
+    let op = if enable { "enable_admin" } else { "disable_admin" };
+    with_audit(&mut conn, &auth.username, op, &format!("id={id}"), |c| {
+        c.execute("UPDATE admins SET status=?1 WHERE id=?2", params![status, id])
+            .map_err(ApiErr::from_err)?;
+        Ok(())
+    })?;
     Ok(Json(json!({ "ok": true, "status": status })))
 }
 

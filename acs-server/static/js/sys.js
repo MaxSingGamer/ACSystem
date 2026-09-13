@@ -31,15 +31,52 @@ async function loadList() {
         <div style="margin-top:10px"><span class="tag ${esc(x.status)}">${esc(x.status)}</span></div></div>`
     ).join('');
     el.querySelectorAll('.sys-card').forEach(c => c.onclick = async () => {
+      const uid = c.dataset.u;
+      // 代管 = 持有该账户密钥的使用权：进入账本必须输入该账本账户的密码
+      const password = await askLedgerPassword(uid);
+      if (password === null) return;
       try {
-        const uid = c.dataset.u;
-        await api('/api/admin/sys/act', { method: 'POST', body: JSON.stringify({ uid }) });
+        await api('/api/admin/sys/act', { method: 'POST', body: JSON.stringify({ uid, password }) });
         await enter(uid);
       } catch (e) { alert('进入失败：' + (e.message || e)); }
     });
   } catch (e) {
     $('sysList').innerHTML = '<p class="muted">加载失败：' + esc(e.message || e) + '</p>';
   }
+}
+
+/// 账本账户密码二次确认弹窗（内联样式，避免依赖页面 CSS）。
+/// 返回 Promise<string|null>：确认返回密码，取消返回 null。密码只留在闭包内，不写日志。
+function askLedgerPassword(uid) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.setAttribute('style', 'position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:99');
+    wrap.innerHTML = `<div style="background:#fff;color:#0b1f3a;border-radius:16px;padding:22px;width:min(380px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.3)">
+      <div style="font-size:16px;font-weight:700;margin-bottom:6px">进入系统账本账户</div>
+      <div style="font-size:13px;color:#68707d;margin-bottom:14px">账户：<b>${esc(uid)}</b><br>请输入该账本账户的密码（代管期间的签名将使用该账户密钥）</div>
+      <input type="password" id="sys-pass" placeholder="账本账户密码" autocomplete="new-password"
+        style="width:100%;padding:10px 12px;border:1px solid #e3e5ea;border-radius:10px;font-size:14px;outline:none">
+      <div id="sys-pass-err" style="color:#c53030;font-size:12.5px;min-height:18px;margin-top:8px"></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn ghost" id="sys-cancel">取消</button>
+        <button class="btn" id="sys-ok">进入账本</button>
+      </div></div>`;
+    document.body.appendChild(wrap);
+    const input = wrap.querySelector('#sys-pass');
+    const err = wrap.querySelector('#sys-pass-err');
+    const done = (v) => { wrap.remove(); resolve(v); };
+    input.focus();
+    wrap.querySelector('#sys-cancel').onclick = () => done(null);
+    wrap.querySelector('#sys-ok').onclick = () => {
+      const v = input.value;
+      if (!v) { err.textContent = '请输入密码'; return; }
+      done(v);
+    };
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') wrap.querySelector('#sys-ok').click();
+      if (e.key === 'Escape') done(null);
+    };
+  });
 }
 
 async function enter(uid) {

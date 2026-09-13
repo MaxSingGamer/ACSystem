@@ -2,7 +2,7 @@
 //!
 //! 账户分表：accounts_country / accounts_company / accounts_individual / accounts_system（系统账户：PreIssuedAccount/AESystem/AlphaEU）。
 //! 管理员：admins（root/finance 两级，密钥内置）。成员注册表：member_countries / member_companies。
-//! 交易：transactions（统一总账）+ tx_confirmations（双方确认）。
+//! 交易：transactions（统一总账，确认时间/拒收理由内联，不再另建确认表）。
 
 use std::path::Path;
 
@@ -29,89 +29,75 @@ CREATE TABLE IF NOT EXISTS member_companies(
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'Active');
 
--- 客户端账户登录凭证（密码哈希，用于登录取回加密私钥；客户端注册时写入）
--- v3.1.0：增加 last_login（上次登录时间）与协议同意标记（agree_terms / agree_privacy）
-CREATE TABLE IF NOT EXISTS account_credentials(
-    uid TEXT NOT NULL,
-    type TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    last_login INTEGER NOT NULL DEFAULT 0,
-    agree_terms INTEGER NOT NULL DEFAULT 0,
-    agree_privacy INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY(uid, type));
-
 -- 账本账户分表（无 abbr；UID 为唯一识别符）
+-- 注：不保存任何口令哈希（私钥由用户口令加密，口令不落库）；仅保留同意标识与最近登录时间。
 CREATE TABLE IF NOT EXISTS accounts_country(
     uid TEXT PRIMARY KEY, email TEXT NOT NULL,
     pubkey TEXT NOT NULL, encrypted_seckey TEXT NOT NULL,
     balance INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Active',
-    last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL);
+    last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL,
+    last_login INTEGER NOT NULL DEFAULT 0,
+    agree_terms INTEGER NOT NULL DEFAULT 0, agree_privacy INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS accounts_company(
     uid TEXT PRIMARY KEY, email TEXT NOT NULL,
     pubkey TEXT NOT NULL, encrypted_seckey TEXT NOT NULL,
     balance INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Active',
-    last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL);
+    last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL,
+    last_login INTEGER NOT NULL DEFAULT 0,
+    agree_terms INTEGER NOT NULL DEFAULT 0, agree_privacy INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS accounts_individual(
     uid TEXT PRIMARY KEY, email TEXT NOT NULL,
     pubkey TEXT NOT NULL, encrypted_seckey TEXT NOT NULL,
     balance INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Active',
-    last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL);
+    last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL,
+    last_login INTEGER NOT NULL DEFAULT 0,
+    agree_terms INTEGER NOT NULL DEFAULT 0, agree_privacy INTEGER NOT NULL DEFAULT 0);
 -- 系统账户（PreIssuedAccount / AESystem / AlphaEU）
+-- 注：密钥材料只入库，不再向数据目录导出 .asc/.key 文件；
+--     key_passphrase_enc = 系统账户私钥口令的密文（AES-GCM，密钥为数据目录 master.key），仅服务端代管签名时使用。
 CREATE TABLE IF NOT EXISTS accounts_system(
     uid TEXT PRIMARY KEY, email TEXT NOT NULL,
     pubkey TEXT NOT NULL, encrypted_seckey TEXT NOT NULL,
     balance INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Active',
-    last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL);
+    last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL,
+    last_login INTEGER NOT NULL DEFAULT 0,
+    agree_terms INTEGER NOT NULL DEFAULT 0, agree_privacy INTEGER NOT NULL DEFAULT 0,
+    key_passphrase_enc TEXT NOT NULL DEFAULT '');
 
 -- 统一交易总账
+-- 时间语义：ts = 客户端声明时间（保留原值，参与 tx_hash）；received_at = 服务端收到时间（权威、不可伪造）。
+-- 签名语义：central_sig = 根管理员对 tx_hash 的分离签名（**仅 Mint**）；
+--          receiver_sig = 接收方对 tx_id 的确认签名（Transfer/Issue/Redeem；后台代管确认为 NULL）。
 CREATE TABLE IF NOT EXISTS transactions(
     tx_id TEXT PRIMARY KEY, tx_type TEXT NOT NULL,
     sender TEXT NOT NULL, sender_type TEXT NOT NULL,
     receiver TEXT NOT NULL, receiver_type TEXT NOT NULL,
     amount INTEGER NOT NULL, ts INTEGER NOT NULL,
+    received_at INTEGER NOT NULL DEFAULT 0,
     tx_hash TEXT NOT NULL, sender_sig TEXT NOT NULL,
-    central_sig TEXT, sender_last_hash TEXT, receiver_last_hash TEXT,
-    status TEXT NOT NULL DEFAULT 'Pending');
+    central_sig TEXT, receiver_sig TEXT,
+    sender_last_hash TEXT, receiver_last_hash TEXT,
+    status TEXT NOT NULL DEFAULT 'Pending',
+    confirmed_at INTEGER, reject_reason TEXT);
 CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender, sender_type);
 CREATE INDEX IF NOT EXISTS idx_tx_receiver ON transactions(receiver, receiver_type);
-
--- 双方确认记录（Mint 除外）
-CREATE TABLE IF NOT EXISTS tx_confirmations(
-    tx_id TEXT PRIMARY KEY, confirmed INTEGER NOT NULL DEFAULT 0,
-    reject_reason TEXT, confirmed_at INTEGER);
-
--- 邮箱验证码
-CREATE TABLE IF NOT EXISTS email_codes(
-    email TEXT NOT NULL, code_hash TEXT NOT NULL, purpose TEXT NOT NULL,
-    expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-    verified INTEGER NOT NULL DEFAULT 0);
+-- 每笔交易的哈希必须唯一（tx_hash 含随机 tx_id，正常不会重复；唯一索引使重复哈希直接写入失败）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_hash ON transactions(tx_hash);
 
 -- 管理审计日志
 CREATE TABLE IF NOT EXISTS audit_log(
     id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, op TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL);
-
--- 商品篮子储备账（Issue/Redeem 双向兑换）
-CREATE TABLE IF NOT EXISTS reserve(
-    id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL, qty REAL NOT NULL,
-    holder TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Active', ts INTEGER NOT NULL);
 "#;
 
-/// 客户端库 schema。
+/// 客户端库 schema（核心表；账户类表见 acs-client wallet.rs::CLIENT_SCHEMA）。
+/// 注：客户端**不保存账本副本**（local_ledger 已取消）；账本按需从中心拉取（见 acs-client sync::fetch_ledger）。
+/// 注：历史登录账户（含 uid/公钥/加密私钥）统一存于 `local_accounts` 一张表，
+///     原 `keys`/`login_history` 两表已并入其中（迁移见 acs-client wallet.rs::migrate_local_v2）。
 pub const LOCAL_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS local_ledger(
-    tx_id TEXT PRIMARY KEY, tx_type TEXT NOT NULL,
-    peer TEXT NOT NULL, peer_type TEXT NOT NULL, amount INTEGER NOT NULL,
-    ts INTEGER NOT NULL, tx_hash TEXT NOT NULL, central_sig TEXT, status TEXT NOT NULL,
-    sender TEXT NOT NULL DEFAULT '', receiver TEXT NOT NULL DEFAULT '',
-    direction INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS known_pubkeys(
-    uid TEXT NOT NULL, type TEXT NOT NULL, pubkey TEXT NOT NULL, source TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS keys(
-    uid TEXT NOT NULL, type TEXT NOT NULL, encrypted_seckey TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS login_history(
-    uid TEXT NOT NULL, type TEXT NOT NULL, last_login INTEGER NOT NULL,
-    remember INTEGER NOT NULL DEFAULT 0);
+    uid TEXT NOT NULL, type TEXT NOT NULL, pubkey TEXT NOT NULL, source TEXT NOT NULL,
+    PRIMARY KEY(uid, type));
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 "#;
 
@@ -124,14 +110,14 @@ pub fn init_central(conn: &Connection) -> Result<()> {
 /// 初始化客户端（本地）库表。
 pub fn init_local(conn: &Connection) -> Result<()> {
     conn.execute_batch(LOCAL_SCHEMA)?;
-    // 老库补列：sender / receiver / direction（供账单区分收/支）
-    ensure_col(conn, "local_ledger", "sender", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_col(conn, "local_ledger", "receiver", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_col(conn, "local_ledger", "direction", "INTEGER NOT NULL DEFAULT 0")?;
+    // 客户端不再保留账本副本：清掉历史遗留的 local_ledger 表（若存在）
+    conn.execute_batch("DROP TABLE IF EXISTS local_ledger;")?;
+    // keys / login_history 的数据迁移由 wallet::migrate_local_v2 处理（先搬后删）
     Ok(())
 }
 
 /// 若本地表缺列则 ALTER TABLE 补列（SQLite 老库升级）。
+#[allow(dead_code)]
 fn ensure_col(conn: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
     let exists: bool = conn
         .query_row(
@@ -177,12 +163,14 @@ pub fn migrate_center(conn: &Connection) -> Result<()> {
              DROP TABLE accounts_bank;",
         )?;
     }
-    // 类型字符串迁移：凭证 / 交易中的 'Bank' -> 'Company'（企业账户重命名）
-    conn.execute("UPDATE account_credentials SET type='Company' WHERE type='Bank'", [])?;
+    // 类型字符串迁移：交易中的 'Bank' -> 'Company'（企业账户重命名）
     conn.execute("UPDATE transactions SET sender_type='Company' WHERE sender_type='Bank'", [])?;
     conn.execute("UPDATE transactions SET receiver_type='Company' WHERE receiver_type='Bank'", [])?;
-    // 废弃表
-    for t in ["member_towns", "central_keys", "pending_registrations"] {
+    // 废弃表：老版本遗留（mirror_* 为已取消的只读镜像；reserve/email_codes 从未启用）
+    for t in [
+        "member_towns", "central_keys", "pending_registrations",
+        "mirror_keys", "mirror_registry", "reserve", "email_codes",
+    ] {
         if table_exists(conn, t) {
             conn.execute(&format!("DROP TABLE IF EXISTS {t}"), [])?;
         }
@@ -193,31 +181,73 @@ pub fn migrate_center(conn: &Connection) -> Result<()> {
             conn.execute(&format!("ALTER TABLE {t} DROP COLUMN abbr"), [])?;
         }
     }
-    // 凭证表补列（老库升级）：last_login / agree_terms / agree_privacy
-    if column_exists(conn, "account_credentials", "last_login") == false {
-        let _ = conn.execute(
-            "ALTER TABLE account_credentials ADD COLUMN last_login INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
+    // 账户表补列：同意标识与最近登录时间
+    for t in ["accounts_country", "accounts_company", "accounts_individual", "accounts_system"] {
+        ensure_col(conn, t, "last_login", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_col(conn, t, "agree_terms", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_col(conn, t, "agree_privacy", "INTEGER NOT NULL DEFAULT 0")?;
     }
-    if column_exists(conn, "account_credentials", "agree_terms") == false {
-        let _ = conn.execute(
-            "ALTER TABLE account_credentials ADD COLUMN agree_terms INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
+    // 系统账户：口令密文列（密钥材料只入库，不再导出 .asc/.key 文件）
+    ensure_col(conn, "accounts_system", "key_passphrase_enc", "TEXT NOT NULL DEFAULT ''")?;
+    // 合并 account_credentials → accounts_*（老库升级），随后删除旧表
+    // 注：旧表里的 password_hash 一律丢弃（不再保存任何口令哈希）
+    if table_exists(conn, "account_credentials") {
+        ensure_col(conn, "account_credentials", "last_login", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_col(conn, "account_credentials", "agree_terms", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_col(conn, "account_credentials", "agree_privacy", "INTEGER NOT NULL DEFAULT 0")?;
+        // 老库类型字符串归一（企业账户重命名 Bank -> Company）
+        conn.execute("UPDATE account_credentials SET type='Company' WHERE type='Bank'", [])?;
+        for (t, ty) in [
+            ("accounts_country", "Country"),
+            ("accounts_company", "Company"),
+            ("accounts_individual", "Individual"),
+            ("accounts_system", "System"),
+        ] {
+            conn.execute(
+                &format!(
+                    "UPDATE {t} SET \
+                       last_login=IFNULL((SELECT c.last_login FROM account_credentials c WHERE c.uid={t}.uid AND c.type=?1), last_login), \
+                       agree_terms=IFNULL((SELECT c.agree_terms FROM account_credentials c WHERE c.uid={t}.uid AND c.type=?1), agree_terms), \
+                       agree_privacy=IFNULL((SELECT c.agree_privacy FROM account_credentials c WHERE c.uid={t}.uid AND c.type=?1), agree_privacy)"
+                ),
+                rusqlite::params![ty],
+            )?;
+        }
+        conn.execute("DROP TABLE account_credentials", [])?;
     }
-    if column_exists(conn, "account_credentials", "agree_privacy") == false {
-        let _ = conn.execute(
-            "ALTER TABLE account_credentials ADD COLUMN agree_privacy INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
+    // 移除历史遗留的 password_hash 列（不再保存任何口令哈希）
+    for t in ["accounts_country", "accounts_company", "accounts_individual", "accounts_system"] {
+        if column_exists(conn, t, "password_hash") {
+            let _ = conn.execute(&format!("ALTER TABLE {t} DROP COLUMN password_hash"), []);
+        }
     }
-    // 新增确认表
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS tx_confirmations(
-            tx_id TEXT PRIMARY KEY, confirmed INTEGER NOT NULL DEFAULT 0,
-            reject_reason TEXT, confirmed_at INTEGER);",
-    )?;
+    // 交易表补列：服务端收到时间 / 接收方确认签名 / 确认时间 / 拒收理由
+    ensure_col(conn, "transactions", "received_at", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_col(conn, "transactions", "receiver_sig", "TEXT")?;
+    ensure_col(conn, "transactions", "confirmed_at", "INTEGER")?;
+    ensure_col(conn, "transactions", "reject_reason", "TEXT")?;
+    // 交易哈希唯一索引（老库若存在历史重复哈希则创建失败，此处只记录不中断启动）
+    if let Err(e) = conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_hash ON transactions(tx_hash)",
+        [],
+    ) {
+        crate::log::err(format!(
+            "交易哈希唯一索引创建失败（可能存在历史重复哈希，请人工核查）：{e}"
+        ));
+    }
+    // 合并 tx_confirmations → transactions（老库升级），随后删除旧表：
+    // 该表的 confirmed 列与 transactions.status 冗余（且从无任何查询读取），
+    // 真正有价值的 reject_reason/confirmed_at 已并入主表。
+    if table_exists(conn, "tx_confirmations") {
+        conn.execute(
+            "UPDATE transactions SET \
+               confirmed_at=IFNULL((SELECT c.confirmed_at FROM tx_confirmations c WHERE c.tx_id=transactions.tx_id), confirmed_at), \
+               reject_reason=IFNULL((SELECT c.reject_reason FROM tx_confirmations c WHERE c.tx_id=transactions.tx_id), reject_reason) \
+             WHERE EXISTS(SELECT 1 FROM tx_confirmations c WHERE c.tx_id=transactions.tx_id)",
+            [],
+        )?;
+        conn.execute("DROP TABLE tx_confirmations", [])?;
+    }
     Ok(())
 }
 

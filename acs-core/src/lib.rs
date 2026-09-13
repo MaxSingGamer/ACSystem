@@ -5,6 +5,7 @@
 //! 每账户哈希链 + 发行权收归理事会（中心密钥由理事长 AES 密码加密保管）。
 
 pub mod account;
+pub mod brand;
 pub mod config;
 pub mod db;
 pub mod errors;

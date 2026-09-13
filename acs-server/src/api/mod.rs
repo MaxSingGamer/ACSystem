@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod admins;
 pub mod audit;
+pub mod brand;
 pub mod client;
 pub mod keys;
 pub mod members;
@@ -101,6 +102,13 @@ impl From<acs_core::errors::AcsError> for ApiErr {
             E::HashMismatch(m) => Self::bad_request(format!("哈希链不一致: {m}")),
             E::Unauthorized(m) => Self::forbidden(m),
             E::InvalidCode => Self::bad_request("验证码无效"),
+            // 以下均为「调用方可修正」的业务错误：必须回 4xx，
+            // 否则客户端会把「状态终态不可变更」「交易已处理」这类正常的规则拒绝当成服务端故障。
+            E::Message(m) => Self::bad_request(m),
+            E::InvalidArgument(m) => Self::bad_request(format!("非法参数: {m}")),
+            E::SignatureInvalid => Self::forbidden("签名无效"),
+            E::KeyLocked => Self::forbidden("中心密钥未解锁"),
+            // 其余（Db / Io / Gpg / Config）属服务端自身故障 → 500
             other => Self::internal(other.to_string()),
         }
     }
@@ -129,5 +137,6 @@ pub fn public_routes() -> Router<AppState> {
     Router::new()
         .merge(client::routes())
         .merge(sync::routes())
+        .merge(brand::routes())
         .merge(crate::update::routes())
 }

@@ -230,13 +230,21 @@ pub struct Transaction {
     pub receiver: String,
     pub receiver_type: AccountType,
     pub amount: i64,
-    pub timestamp: i64,
+    pub timestamp: i64,           // 客户端声明时间（Unix 秒；参与 tx_hash，服务端会校验偏移）
+    #[serde(default)]
+    pub received_at: i64,         // 服务端收到时间（Unix 秒；权威时间轴，不参与哈希，服务端覆写）
     pub tx_hash: String,             // sha256(规范序列化)
     pub sender_sig: String,          // 发送方 detached 签名（armored）
-    pub central_sig: Option<String>, // 铸造=根管理员密钥签名；其余=确认后结算签名
+    pub central_sig: Option<String>, // **仅 Mint**：根管理员对 tx_hash 的分离签名
+    #[serde(default)]
+    pub receiver_sig: Option<String>, // 接收方确认签名（对 tx_id）；后台代管确认时为 None
     pub sender_last_hash: Option<String>,
     pub receiver_last_hash: Option<String>,
     pub status: TransactionStatus,
+    #[serde(default)]
+    pub confirmed_at: Option<i64>,   // 确认/拒收/置错时间（Unix 秒）
+    #[serde(default)]
+    pub reject_reason: Option<String>, // 拒收理由；'error' 表示结算失败
 }
 
 impl Transaction {
@@ -257,12 +265,16 @@ impl Transaction {
             receiver_type,
             amount,
             timestamp: Utc::now().timestamp(),
+            received_at: 0,
             tx_hash: String::new(),
             sender_sig: String::new(),
             central_sig: None,
+            receiver_sig: None,
             sender_last_hash: None,
             receiver_last_hash: None,
             status: TransactionStatus::Pending,
+            confirmed_at: None,
+            reject_reason: None,
         }
     }
 }
@@ -299,7 +311,8 @@ pub struct AdminAccount {
     pub created_at: DateTime<Utc>,
 }
 
-/// 交易确认记录（双方确认机制；Mint 除外）。
+/// 交易确认记录（**已并入 `transactions`**：confirmed_at / reject_reason 字段）。
+/// 保留该类型仅为向后兼容旧调用方；新代码请直接使用 `Transaction`。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TxConfirmation {
     pub tx_id: String,

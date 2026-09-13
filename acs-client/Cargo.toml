@@ -1,6 +1,6 @@
 [package]
 name = "acs-client"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2024"
 description = "A€（Alpha Coin）钱包客户端 —— Tauri 桌面应用（Web GUI）"
 license = "MIT"

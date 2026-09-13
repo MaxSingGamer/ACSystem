@@ -68,9 +68,60 @@ impl CoreConfig {
         fs::create_dir_all(&self.gpg_homedir)?;
         Ok(())
     }
-
     /// gpg 是否可用。
     pub fn gpg_available(&self) -> bool {
         Path::new(&self.gpg_bin).exists()
     }
+}
+
+/// 把「各端数据目录」下 `.env` 的内容**载入进程环境变量**。
+///
+/// 这是让 `.env` 真正成为唯一配置入口的关键：所有读取都走环境变量
+/// （端口、品牌、迭代次数、更新源……），而 `.env` 则在启动最早期注入。
+///
+/// 规则：
+///  - 行格式 `KEY=VALUE`；忽略空行与 `#` 注释；兼容 `export KEY=VALUE`；
+///  - 值首尾的引号（单/双）会被去掉；
+///  - **已存在的进程环境变量优先，不覆盖**，便于临时用真实环境变量覆盖 `.env`；
+///  - 文件不存在或无法读取时静默跳过（`.env` 属可选）。
+///
+/// 返回实际写入的键数量。
+///
+/// # Safety / 调用时机
+/// `std::env::set_var` 在 Rust 2024 下是 `unsafe`：它要求调用时**没有其他线程
+/// 在读环境变量**。因此本函数必须在进程启动的最早期（初始化线程池 / tokio runtime
+/// 之前）调用；acs-server 在 `main` 第一段、acs-client 在打开钱包时调用。
+pub fn load_env_file(dir: &Path) -> usize {
+    let path = dir.join(".env");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return 0;
+    };
+    let mut n = 0usize;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        if std::env::var_os(k).is_some() {
+            continue; // 真实环境变量优先
+        }
+        let v = v.trim();
+        let v = v
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(v);
+        // SAFETY: 调用约定见上文「调用时机」——启动早期、单线程。
+        unsafe { std::env::set_var(k, v) };
+        n += 1;
+    }
+    n
 }

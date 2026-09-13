@@ -5,10 +5,10 @@ use acs_core::models::AccountType;
 use crate::client_api;
 use crate::wallet::Wallet;
 
-/// 未配置中心时使用默认地址。
+/// 未配置中心时使用默认地址（可由 .env 的 `ACS_PUBLIC_URL` 定制）。
 pub fn ensure_server(w: &mut Wallet) {
     if w.info.server_url.trim().is_empty() {
-        let _ = w.set_server_url(crate::DEFAULT_SERVER);
+        let _ = w.set_server_url(&crate::default_server());
     }
 }
 
@@ -24,7 +24,14 @@ pub fn sha256_hex(data: &[u8]) -> String {
     s
 }
 
-/// 登录：本地缓存取回，或向中心 fetch-key（服务端校验密码哈希）。
+/// 取本机 gpg 钥环中该账户的公钥（armored）。失败返回空串（不阻断登录）。
+fn local_pubkey(w: &Wallet, uid: &str) -> String {
+    w.fingerprint(uid)
+        .and_then(|fp| w.gpg.export_public_key(&fp).ok())
+        .unwrap_or_default()
+}
+
+/// 登录：本地历史账户缓存取回（免输 UID），或向中心 fetch-key。
 /// v3.1.0：须携带同意《使用协议》《隐私政策》标识（前端已强制勾选后才允许调用）。
 pub fn login_account(
     w: &mut Wallet,
@@ -37,7 +44,7 @@ pub fn login_account(
     if !agree_terms || !agree_privacy {
         anyhow::bail!("登录须先同意《使用协议》与《隐私政策》");
     }
-    // 1) 本地缓存私钥：导入并校验口令
+    // 1) 本地历史账户缓存私钥：导入并校验口令（口令即私钥解密口令）
     if let Some(acc) = w.local_account(uid) {
         if !acc.encrypted_seckey.is_empty()
             && w.gpg.import_key(&acc.encrypted_seckey).is_ok()
@@ -45,13 +52,26 @@ pub fn login_account(
                 .and_then(|fp| w.gpg.verify_passphrase(&fp, pass).ok())
                 .is_some()
         {
+            // 首次登录时补写公钥（登录界面展示历史账户用）
+            if acc.pubkey.is_empty() {
+                let pk = local_pubkey(w, uid);
+                if !pk.is_empty() {
+                    let _ = w.save_local_account(
+                        uid,
+                        acc.atype,
+                        &acc.email,
+                        &pk,
+                        &acc.encrypted_seckey,
+                    );
+                }
+            }
             w.switch_account(uid)?;
             return Ok(uid.to_string());
         }
     }
-    // 2) 无缓存或口令不符：向中心取回（服务端校验密码哈希）
+    // 2) 无缓存或口令不符：向中心取回（仅取回加密私钥，服务端不校验口令）
     let known_type = w.local_account(uid).map(|a| a.atype);
-    let r = client_api::fetch_key(w, uid, known_type, pass, agree_terms, agree_privacy)?;
+    let r = client_api::fetch_key(w, uid, known_type, agree_terms, agree_privacy)?;
     let email = r.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let sek = r
         .get("encrypted_seckey")
@@ -69,7 +89,15 @@ pub fn login_account(
         .or(known_type)
         .unwrap_or(AccountType::Individual);
     w.gpg.import_key(&sek).map_err(|e| anyhow::anyhow!("导入密钥失败：{e}"))?;
-    w.save_local_account(uid, atype, &email, &sek)?;
+    // 校验口令：口令错则不入账（否则历史账户列表会留下无法解密的条目）
+    let fp = w
+        .fingerprint(uid)
+        .ok_or_else(|| anyhow::anyhow!("导入后未找到账户 {uid} 的密钥"))?;
+    w.gpg
+        .verify_passphrase(&fp, pass)
+        .map_err(|_| anyhow::anyhow!("密码错误：无法解开该账户私钥"))?;
+    let pk = w.gpg.export_public_key(&fp).unwrap_or_default();
+    w.save_local_account(uid, atype, &email, &pk, &sek)?;
     w.switch_account(uid)?;
     Ok(uid.to_string())
 }
@@ -96,9 +124,8 @@ pub fn register_account(
     ensure_server(w);
     let gk = w.create_key(uid, email, pass)?;
     w.init_wallet(uid, atype, email)?;
-    let salt = uuid::Uuid::new_v4().to_string();
-    let password_hash = format!("{salt}${}", sha256_hex(format!("{salt}:{pass}").as_bytes()));
-    w.save_local_account(uid, atype, email, &gk.encrypted_seckey)?;
-    client_api::open_account(w, &gk.encrypted_seckey, &password_hash, agree_terms, agree_privacy)?;
+    // 只上传“口令加密后的私钥”；不上传口令，也不上传任何口令哈希
+    w.save_local_account(uid, atype, email, &gk.pubkey, &gk.encrypted_seckey)?;
+    client_api::open_account(w, &gk.encrypted_seckey, agree_terms, agree_privacy)?;
     Ok(())
 }

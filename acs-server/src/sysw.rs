@@ -65,9 +65,14 @@ async fn sys_list(
 #[derive(Deserialize)]
 pub struct ActReq {
     pub uid: String,
+    /// 该系统账本账户的密码（＝该账户私钥的解密口令）。
+    /// 代管期间所有签名都由服务端用该账户密钥完成，故进入账本必须二次确认身份。
+    #[serde(default)]
+    pub password: String,
 }
 
 /// 后台管理员「进入」某个系统账本账户（建立代管会话）。
+/// 必须输入该账户密码：代管 ＝ 持有该账户密钥的使用权，口令错则拒绝进入（并计入失败锁定）。
 async fn sys_act(
     State(st): State<AppState>,
     auth: AuthUser,
@@ -77,15 +82,49 @@ async fn sys_act(
     if uid.is_empty() {
         return Err(ApiErr::bad_request("缺少系统账户 uid"));
     }
-    let conn = st.db.lock().unwrap();
-    let acc = account::get_account(&conn, &uid, AccountType::System)
-        .map_err(ApiErr::from)?
-        .ok_or_else(|| ApiErr::not_found("系统账户不存在"))?;
+    if req.password.is_empty() {
+        return Err(ApiErr::bad_request("请输入账本账户密码"));
+    }
+    let now = chrono::Utc::now().timestamp();
+    let lock_key = format!("sys:{uid}");
+    if let Some(wait) = crate::auth::lock_wait(&st, &lock_key, now) {
+        return Err(ApiErr::too_many_requests(format!(
+            "尝试过于频繁，请 {wait} 秒后重试"
+        )));
+    }
+    // 只持锁读一次（口令验算在锁外做，避免占用全局库锁）
+    let (acc, enc) = {
+        let conn = st.db.lock().unwrap();
+        let acc = account::get_account(&conn, &uid, AccountType::System)
+            .map_err(ApiErr::from)?
+            .ok_or_else(|| ApiErr::not_found("系统账户不存在"))?;
+        let enc: String = conn
+            .query_row(
+                "SELECT key_passphrase_enc FROM accounts_system WHERE uid=?1",
+                rusqlite::params![uid],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        (acc, enc)
+    };
     if acc.status != AccountStatus::Active {
         return Err(ApiErr::forbidden("该系统账户非 Active，无法登录账本"));
     }
+    if enc.is_empty() {
+        return Err(ApiErr::internal(
+            "该系统账户未配置口令密文（请检查服务端初始化；旧库需重新生成系统账户）",
+        ));
+    }
+    let master = master_key(&st)?;
+    let pass = crate::crypto::decrypt_secret(&enc, &master)
+        .map_err(|e| ApiErr::internal(format!("解密系统账户口令失败：{e}")))?;
+    if !crate::password::ct_eq(&pass, &req.password) {
+        crate::auth::register_fail(&st, &lock_key, now);
+        return Err(ApiErr::unauthorized("账本账户密码错误"));
+    }
+    st.login_fails.lock().unwrap().remove(&lock_key);
     st.sys_acting.lock().unwrap().insert(auth.token.clone(), uid.clone());
-    crate::log::info(&format!(
+    crate::log::info(format!(
         "系统账本登录：管理员 {} 代管系统账户 {}",
         auth.username, uid
     ));
@@ -236,7 +275,8 @@ pub struct TxnIdReq {
     pub reason: String,
 }
 
-/// 以代管系统账户身份确认收款（服务端权威，无需客户端签名）。
+/// 以代管系统账户身份确认收款：由服务端用该账户密钥对 `tx_id` 现签，
+/// 保证每笔交易都具备接收方签名（不使用明文标记冒充签名）。
 async fn sys_confirm(
     State(st): State<AppState>,
     auth: AuthUser,
@@ -245,8 +285,12 @@ async fn sys_confirm(
     let Some(uid) = acting_uid(&st, &auth) else {
         return Err(ApiErr::forbidden("请先在后台进入系统账本账户"));
     };
+    // 先签名再取连接锁：sign_system 内部会短暂锁库读口令密文，
+    // 若在持有连接锁时调用会触发 std::sync::Mutex 自死锁。
+    let receiver_sig = sign_system(&st, &uid, req.tx_id.as_bytes())?;
     let mut conn = st.db.lock().unwrap();
-    transaction::confirm_tx(&mut conn, &req.tx_id, &uid, AccountType::System).map_err(ApiErr::from)?;
+    transaction::confirm_tx(&mut conn, &req.tx_id, &uid, AccountType::System, &receiver_sig)
+        .map_err(ApiErr::from)?;
     Ok(Json(json!({ "ok": true, "status": "Confirmed", "message": "已确认收款" })))
 }
 
@@ -274,17 +318,34 @@ async fn sys_logout(
     Ok(Json(json!({ "ok": true, "logged_in": false })))
 }
 
-/// 用系统账户 gpg 密钥对消息签名。口令从 `{uid}.key`（主密钥 AES 加密）解密取得。
+/// 读取主密钥（数据目录 `master.key`）：用于解密系统账户口令密文。
+fn master_key(st: &AppState) -> Result<String, ApiErr> {
+    std::fs::read_to_string(st.data_dir.join("master.key"))
+        .map_err(|_| ApiErr::internal("缺少 master.key（主密钥），无法为系统账户签名"))
+}
+
+/// 用系统账户 gpg 密钥对消息签名。
+/// 口令密文存于数据库 `accounts_system.key_passphrase_enc`（**不再从 {uid}.key 文件读取**），
+/// 用数据目录 `master.key` 解密取得口令。
 fn sign_system(st: &AppState, uid: &str, msg: &[u8]) -> Result<String, ApiErr> {
     let fp = st
         .gpg
         .fingerprint(uid)
         .ok()
         .ok_or_else(|| ApiErr::internal(format!("gpg 中未找到系统账户 {uid} 的密钥")))?;
-    let master = std::fs::read_to_string(st.data_dir.join("master.key"))
-        .map_err(|_| ApiErr::internal("缺少 master.key（主密钥），无法为系统账户签名"))?;
-    let enc = std::fs::read_to_string(st.data_dir.join(format!("{uid}.key")))
-        .map_err(|_| ApiErr::internal(format!("缺少 {uid}.key（系统账户口令密文）")))?;
+    let enc: String = {
+        let conn = st.db.lock().unwrap();
+        conn.query_row(
+            "SELECT key_passphrase_enc FROM accounts_system WHERE uid=?1",
+            rusqlite::params![uid],
+            |r| r.get(0),
+        )
+        .map_err(|_| ApiErr::internal(format!("系统账户 {uid} 缺少口令密文（未初始化）")))?
+    };
+    if enc.is_empty() {
+        return Err(ApiErr::internal(format!("系统账户 {uid} 未设置口令密文")));
+    }
+    let master = master_key(st)?;
     let passphrase = crate::crypto::decrypt_secret(&enc, &master)
         .map_err(|e| ApiErr::internal(format!("解密系统账户口令失败：{e}")))?;
     st.gpg

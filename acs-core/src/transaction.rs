@@ -1,7 +1,9 @@
 //! 交易数据访问与结算（双方确认机制）。
 //!
 //! - `Mint`（铸造）：根管理员发起，只打入 PreIssuedAccount，**自动确认**（需中心签名）。
-//! - `Transfer / Issue / Redeem`：提交后为 Pending，**接收方确认**后才结算（`tx_confirmations`）。
+//! - `Transfer / Issue / Redeem`：提交后为 Pending，**接收方确认**后才结算。
+//! 确认信息（`receiver_sig` / `confirmed_at` / `reject_reason`）直接内联在 `transactions` 表中，
+//! 不再另建 `tx_confirmations` 附属表（该表的 confirmed 列与 status 冗余，且从未被任何查询读取）。
 //! 所有结算在单个 `BEGIN IMMEDIATE` 事务内完成，重查余额与链头，防双花。
 
 use rusqlite::{params, Connection, Row, TransactionBehavior};
@@ -12,7 +14,7 @@ use crate::models::{
     AccountStatus, AccountType, Transaction, TransactionStatus, TransactionType,
 };
 
-const TX_COLS: &str = "tx_id, tx_type, sender, sender_type, receiver, receiver_type, amount, ts, tx_hash, sender_sig, central_sig, sender_last_hash, receiver_last_hash, status";
+const TX_COLS: &str = "tx_id, tx_type, sender, sender_type, receiver, receiver_type, amount, ts, received_at, tx_hash, sender_sig, central_sig, receiver_sig, sender_last_hash, receiver_last_hash, status, confirmed_at, reject_reason";
 
 /// 交易规范序列化（不含 tx_hash / 签名 / 状态），用于计算 tx_hash。
 pub fn canonical_string(tx: &Transaction) -> String {
@@ -59,18 +61,22 @@ fn map_tx(row: &Row) -> rusqlite::Result<Transaction> {
         receiver_type: AccountType::from_str(&receiver_type).unwrap_or(AccountType::Individual),
         amount: row.get("amount")?,
         timestamp: row.get("ts")?,
+        received_at: row.get("received_at")?,
         tx_hash: row.get("tx_hash")?,
         sender_sig: row.get("sender_sig")?,
         central_sig: row.get("central_sig")?,
+        receiver_sig: row.get("receiver_sig")?,
         sender_last_hash: row.get("sender_last_hash")?,
         receiver_last_hash: row.get("receiver_last_hash")?,
         status: TransactionStatus::from_str(&status).unwrap_or(TransactionStatus::Pending),
+        confirmed_at: row.get("confirmed_at")?,
+        reject_reason: row.get("reject_reason")?,
     })
 }
 
 fn insert_transaction(conn: &Connection, tx: &Transaction) -> Result<()> {
     let sql = format!(
-        "INSERT INTO transactions({TX_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"
+        "INSERT INTO transactions({TX_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)"
     );
     conn.execute(
         &sql,
@@ -83,12 +89,16 @@ fn insert_transaction(conn: &Connection, tx: &Transaction) -> Result<()> {
             tx.receiver_type.as_str(),
             tx.amount,
             tx.timestamp,
+            tx.received_at,
             tx.tx_hash,
             tx.sender_sig,
             tx.central_sig,
+            tx.receiver_sig,
             tx.sender_last_hash,
             tx.receiver_last_hash,
             tx.status.as_str(),
+            tx.confirmed_at,
+            tx.reject_reason,
         ],
     )?;
     Ok(())
@@ -145,19 +155,27 @@ pub fn list_pending_for(
 
 /// 提交交易。
 /// - Mint：需中心签名，直接结算并 Confirmed（自动确认）。
-/// - 其他：插入 Pending + tx_confirmations，等待接收方确认。
+/// - 其他：插入 Pending，等待接收方确认。
+///
+/// 核心不变量：**每笔交易必须有唯一哈希与有效签名**。
+/// - `tx_hash` 由 `compute_tx_hash` 生成（含随机 tx_id）并由唯一索引保证不重复；
+/// - Mint 的签名是 `central_sig`（根管理员，发送方非账本账户故无 sender_sig）；
+/// - 其余类型的发送方签名 `sender_sig` 必须非空（服务端已先用公钥验签）。
 pub fn submit_tx(conn: &mut Connection, tx: &Transaction) -> Result<()> {
+    if tx.tx_hash.trim().is_empty() {
+        return Err(AcsError::Message("交易缺少哈希".into()));
+    }
     if tx.tx_type == TransactionType::Mint {
-        if tx.central_sig.is_none() {
-            return Err(AcsError::Unauthorized("铸造需要中心（根管理员）签名".into()));
-        }
+        require_sig(&tx.central_sig, "中心（根管理员）")?;
         let db = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         apply_settlement(&db, tx)?;
-        mark_confirmed(&db, &tx.tx_id, None)?;
-        insert_transaction(&db, &confirmed_tx(tx))?;
+        // 自动确认：直接以 Confirmed 落库。central_sig 保留根管理员真签名，
+        // 不再有「先 UPDATE 后 INSERT」的覆写陷阱（旧写法会往该列写入明文文本）。
+        insert_transaction(&db, &confirmed_tx(tx, None))?;
         db.commit()?;
         return Ok(());
     }
+    require_sig(&Some(tx.sender_sig.clone()), "发送方")?;
     // 非 Mint：提交为 Pending，校验发送方状态与余额
     let db = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let sender = crate::account::require_account(&db, &tx.sender, tx.sender_type)?;
@@ -173,21 +191,23 @@ pub fn submit_tx(conn: &mut Connection, tx: &Transaction) -> Result<()> {
         return Err(AcsError::HashMismatch("发送方链头不一致".into()));
     }
     insert_transaction(&db, tx)?;
-    db.execute(
-        "INSERT OR REPLACE INTO tx_confirmations(tx_id, confirmed, reject_reason, confirmed_at) VALUES (?1,0,NULL,NULL)",
-        params![tx.tx_id],
-    )?;
     db.commit()?;
     Ok(())
 }
 
 /// 接收方确认交易并结算。
+/// `receiver_sig`：接收方对 `tx_id` 的分离签名（**必填**，服务端已用接收方公钥验签；
+/// 后台代管系统账本账户时由服务端用该账户密钥现签）。
 pub fn confirm_tx(
     conn: &mut Connection,
     tx_id: &str,
     actor_uid: &str,
     actor_type: AccountType,
+    receiver_sig: &str,
 ) -> Result<()> {
+    if receiver_sig.trim().is_empty() {
+        return Err(AcsError::Unauthorized("接收方确认签名缺失".into()));
+    }
     let db = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let tx = require_tx(&db, tx_id)?;
     if tx.status != TransactionStatus::Pending {
@@ -197,16 +217,14 @@ pub fn confirm_tx(
         return Err(AcsError::Unauthorized("仅接收方可确认该交易".into()));
     }
     apply_settlement(&db, &tx)?;
-    mark_confirmed(&db, tx_id, Some(&tx))?;
     db.execute(
-        "UPDATE tx_confirmations SET confirmed=1, reject_reason=NULL, confirmed_at=?1 WHERE tx_id=?2",
-        params![chrono::Utc::now().timestamp(), tx_id],
+        "UPDATE transactions SET status='Confirmed', receiver_sig=?1, confirmed_at=?2 WHERE tx_id=?3",
+        params![receiver_sig, chrono::Utc::now().timestamp(), tx_id],
     )?;
     db.commit()?;
     Ok(())
 }
-
-/// 接收方拒绝交易。
+/// 接收方拒绝交易（理由写入主表，可供对账与审计查询）。
 pub fn reject_tx(
     conn: &mut Connection,
     tx_id: &str,
@@ -223,11 +241,7 @@ pub fn reject_tx(
         return Err(AcsError::Unauthorized("仅接收方可拒绝该交易".into()));
     }
     db.execute(
-        "UPDATE transactions SET status='Rejected' WHERE tx_id=?1",
-        params![tx_id],
-    )?;
-    db.execute(
-        "UPDATE tx_confirmations SET confirmed=0, reject_reason=?1, confirmed_at=?2 WHERE tx_id=?3",
+        "UPDATE transactions SET status='Rejected', reject_reason=?1, confirmed_at=?2 WHERE tx_id=?3",
         params![reason, chrono::Utc::now().timestamp(), tx_id],
     )?;
     db.commit()?;
@@ -246,11 +260,7 @@ pub fn mark_error(
         return Err(AcsError::Message("该交易已处理（不可再修改状态）".into()));
     }
     db.execute(
-        "UPDATE transactions SET status='Error' WHERE tx_id=?1",
-        params![tx_id],
-    )?;
-    db.execute(
-        "UPDATE tx_confirmations SET confirmed=0, reject_reason='error', confirmed_at=?1 WHERE tx_id=?2",
+        "UPDATE transactions SET status='Error', reject_reason='error', confirmed_at=?1 WHERE tx_id=?2",
         params![chrono::Utc::now().timestamp(), tx_id],
     )?;
     db.commit()?;
@@ -326,27 +336,22 @@ fn apply_settlement(conn: &Connection, tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
-fn mark_confirmed(conn: &Connection, tx_id: &str, tx: Option<&Transaction>) -> Result<()> {
-    let mut central = tx
-        .and_then(|t| t.central_sig.clone())
-        .unwrap_or_else(|| {
-            format!("confirmed:{}", chrono::Utc::now().timestamp())
-        });
-    if let Some(t) = tx {
-        if t.central_sig.is_none() {
-            central = format!("confirmed-by:{}@{}", t.receiver, chrono::Utc::now().timestamp());
-        }
+/// 断言签名存在且非空（核心不变量）。
+fn require_sig(sig: &Option<String>, who: &str) -> Result<()> {
+    match sig.as_deref() {
+        Some(s) if !s.trim().is_empty() => Ok(()),
+        _ => Err(AcsError::Unauthorized(format!("{who}签名缺失"))),
     }
-    conn.execute(
-        "UPDATE transactions SET status='Confirmed', central_sig=?1 WHERE tx_id=?2",
-        params![central, tx_id],
-    )?;
-    Ok(())
 }
 
-fn confirmed_tx(tx: &Transaction) -> Transaction {
+/// 生成「已确认」副本：设置状态与确认时间（Mint 自动确认 / 接收方确认）。
+fn confirmed_tx(tx: &Transaction, receiver_sig: Option<&str>) -> Transaction {
     let mut t = tx.clone();
     t.status = TransactionStatus::Confirmed;
+    t.confirmed_at = Some(chrono::Utc::now().timestamp());
+    if let Some(s) = receiver_sig {
+        t.receiver_sig = Some(s.to_string());
+    }
     t
 }
 

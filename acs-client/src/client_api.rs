@@ -17,12 +17,12 @@ fn base(w: &Wallet) -> Result<String> {
     Ok(url.to_string())
 }
 
-/// 开立账户：导出钱包公钥，连同密码加密私钥与密码哈希上传到中心（支持多设备登录）。
+/// 开立账户：导出钱包公钥，连同“用户口令加密的私钥”上传到中心（支持多设备登录）。
+/// **不上传任何口令哈希**（口令不落库、不传输）。
 /// v3.1.0：须携带已同意《使用协议》/《隐私政策》标识，未同意服务端驳回注册。
 pub fn open_account(
     w: &Wallet,
     encrypted_seckey: &str,
-    password_hash: &str,
     agree_terms: bool,
     agree_privacy: bool,
 ) -> Result<serde_json::Value> {
@@ -40,7 +40,6 @@ pub fn open_account(
         "email": w.info.email,
         "pubkey": pubkey,
         "encrypted_seckey": encrypted_seckey,
-        "password_hash": password_hash,
         "agree_terms": agree_terms,
         "agree_privacy": agree_privacy,
     });
@@ -70,14 +69,14 @@ pub fn open_account(
     }
 }
 
-/// 登录：向中心请求取回加密私钥（服务端校验密码哈希后返回），供本机导入或跨设备恢复。
-/// atype 为 None 时由中心按 UID 自动匹配账户类型。
-/// v3.1.0：登录请求须携带已同意协议标识；服务端校验，未同意则拒绝。
+/// 登录：向中心取回加密私钥（供本机导入或跨设备恢复）。
+/// **不再上送口令**：私钥本身由用户口令加密（GPG S2K），客户端本地用口令解开即完成校验；
+/// 服务端只按 uid/type 返回密文，不保存也不校验任何口令哈希。
+/// v3.1.0：仍携带协议同意标识，服务端记录。
 pub fn fetch_key(
     w: &Wallet,
     uid: &str,
     atype: Option<AccountType>,
-    password: &str,
     agree_terms: bool,
     agree_privacy: bool,
 ) -> Result<serde_json::Value> {
@@ -85,7 +84,6 @@ pub fn fetch_key(
     let body = json!({
         "uid": uid,
         "type": atype.map(|t| t.as_str().to_string()).unwrap_or_default(),
-        "password": password,
         "agree_terms": agree_terms,
         "agree_privacy": agree_privacy,
     });

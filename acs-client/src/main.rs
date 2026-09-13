@@ -187,6 +187,20 @@ fn run_tauri() -> Result<()> {
 
 // ---------------- 非交互子命令 ----------------
 
+/// 改变状态的子命令统一前置：钱包必须已初始化，否则按**失败**返回。
+///
+/// 历史上这些分支是 `println!("钱包尚未初始化。"); return Ok(())`，退出码为 0，
+/// 导致脚本/自动化把“什么都没做”当成成功（例如钱包损坏时 `open` 看起来注册成功）。
+fn wallet_ready() -> Result<Wallet> {
+    let w = Wallet::open()?;
+    if !w.info.initialized() {
+        return Err(anyhow!(
+            "钱包尚未初始化：先运行 `acs-client new --uid <UID> --email <邮箱> --pass <口令>` 创建钱包"
+        ));
+    }
+    Ok(w)
+}
+
 fn cmd_status() -> Result<()> {
     let w = Wallet::open()?;
     if !w.info.initialized() {
@@ -206,11 +220,9 @@ fn cmd_status() -> Result<()> {
 }
 
 fn cmd_sync() -> Result<()> {
-    let mut w = Wallet::open()?;
-    if !w.info.initialized() {
-        println!("钱包尚未初始化。先创建钱包后再同步。");
-        return Ok(());
-    }
+    // 未初始化时按失败返回：否则“什么都没同步”会被自动化当成成功。
+    // （`status` 是纯查询，仍允许在未初始化状态下打印状态。）
+    let mut w = wallet_ready()?;
     let r = sync::pull(&w)?;
     w.mark_synced(r.server_time, None)?;
     println!("同步完成：新增交易 {} · 账户快照 {} · 快照哈希 {}",
@@ -233,8 +245,11 @@ fn cmd_new(
 ) -> Result<()> {
     let mut w = Wallet::open()?;
     if w.info.initialized() {
-        println!("已存在钱包（UID={}）。如需重建请删除 ~/.alpha_dir 后重试。", w.info.uid);
-        return Ok(());
+        // 不返回成功：“什么都没做”对脚本/自动化是误导
+        return Err(anyhow!(
+            "已存在钱包（UID={}）：如需重建请删除数据目录 `acs-client` 后重试，或用另一数据目录",
+            w.info.uid
+        ));
     }
     let uid = match uid {
         Some(u) => u,
@@ -284,7 +299,7 @@ fn cmd_new(
     }
     w.init_wallet(&uid, atype, &email)?;
     // 写入本地账户清单（登录界面可见，支持多账户登录 / 跨设备登录取回）
-    let _ = w.save_local_account(&uid, atype, &email, &gk.encrypted_seckey);
+    let _ = w.save_local_account(&uid, atype, &email, &gk.pubkey, &gk.encrypted_seckey);
     println!("钱包创建完成：{uid} · {}", atype.as_str());
     println!("数据目录：{}", wallet::data_dir_str().display());
     println!("运行 `acs-client` 进入界面，或 `acs-client sync` 同步账本。");
@@ -292,11 +307,7 @@ fn cmd_new(
 }
 
 fn cmd_send(receiver: &str, amount: i64, pass: &str) -> Result<()> {
-    let w = Wallet::open()?;
-    if !w.info.initialized() {
-        println!("钱包尚未初始化。先创建钱包。");
-        return Ok(());
-    }
+    let w = wallet_ready()?;
     let mut r = receiver.to_string();
     let mut rtype = acs_core::models::AccountType::Individual;
     if let Some(idx) = r.find('@') {
@@ -340,15 +351,14 @@ fn cmd_config(server: Option<&str>, apikey: Option<&str>) -> Result<()> {
 }
 
 fn cmd_open() -> Result<()> {
-    let w = Wallet::open()?;
-    if !w.info.initialized() {
-        println!("钱包尚未初始化。先创建钱包。");
-        return Ok(());
-    }
-    // 加密私钥取本地缓存；CLI 模式无密码，不启用登录取回（password_hash 留空）
-    let sek = w.encrypted_seckey().unwrap_or_default();
+    let w = wallet_ready()?;
+    // 加密私钥取本地缓存；CLI 为本地运维工具，不校验口令（服务端亦不存任何口令材料）
+    // 缺密文时必须失败：否则会在中心留下一个“无法取回私钥”的账户
+    let sek = w.encrypted_seckey().ok_or_else(|| {
+        anyhow!("本地缺少加密私钥缓存，无法开立账户；请重建钱包或先登录一次取得密钥")
+    })?;
     // CLI 为本地运维工具：以操作员身份明示同意（GUI 端已强制勾选才可自助注册）
-    let r = client_api::open_account(&w, &sek, "", true, true)?;
+    let r = client_api::open_account(&w, &sek, true, true)?;
     println!("账户开立完成：{uid} · {ty}（余额 {bal} A€）",
         uid = r.get("uid").and_then(|v| v.as_str()).unwrap_or(""),
         ty = r.get("type").and_then(|v| v.as_str()).unwrap_or(""),
@@ -360,11 +370,7 @@ fn cmd_open() -> Result<()> {
 }
 
 fn cmd_submit(tx_id: Option<&str>) -> Result<()> {
-    let w = Wallet::open()?;
-    if !w.info.initialized() {
-        println!("钱包尚未初始化。");
-        return Ok(());
-    }
+    let w = wallet_ready()?;
     let results = client_api::submit_outbox(&w, tx_id)?;
     if results.is_empty() {
         println!("outbox 中没有待提交交易。");
@@ -377,11 +383,7 @@ fn cmd_submit(tx_id: Option<&str>) -> Result<()> {
 }
 
 fn cmd_confirm(tx_id: Option<&str>, pass: &str, reject: Option<&str>) -> Result<()> {
-    let w = Wallet::open()?;
-    if !w.info.initialized() {
-        println!("钱包尚未初始化。");
-        return Ok(());
-    }
+    let w = wallet_ready()?;
     let tid = match tx_id {
         Some(t) => t.to_string(),
         None => {

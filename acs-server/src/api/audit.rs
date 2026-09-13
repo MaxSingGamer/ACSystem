@@ -12,7 +12,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::{ApiErr, ApiResult};
-use crate::auth::{hash_password, AuthUser};
+use crate::auth::AuthUser;
+use crate::password;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -41,8 +42,7 @@ async fn unlock_audit(
             |r| r.get(0),
         )
         .map_err(ApiErr::from_err)?;
-    let (salt, stored) = pw_hash.split_once('$').unwrap_or(("", &pw_hash));
-    if hash_password(&req.password, salt) != stored {
+    if !password::verify(&req.password, &pw_hash) {
         return Err(ApiErr::forbidden("密码错误"));
     }
     st.audit_unlocked
@@ -134,7 +134,7 @@ async fn export_audit(
         })
         .map_err(ApiErr::from_err)?;
     let mut lines = vec![
-        "# Alpha Coin System - 管理日志导出".to_string(),
+        format!("# {} - 管理日志导出", acs_core::brand::brand().system_name),
         format!("# 导出时间: {}", Utc::now().to_rfc3339()),
         "# 操作者 | 操作 | 详情 | 时间戳(UTC)".to_string(),
     ];
@@ -153,9 +153,43 @@ async fn export_audit(
 }
 
 /// 记录审计日志（敏感操作；改密/建号不记录任何密码细节）。
+///
+/// 写入失败**不再静默吞掉**：审计缺失会让高危操作（铸造、注销账户）失去凭据，
+/// 因此失败时把错误写进 `.alphalog`（[ERR]），便于运维立即发现。
+/// 需要**强原子性**的端点请改用 [`with_audit`]（业务写入与审计同一事务）。
 pub fn log_audit(conn: &Connection, actor: &str, op: &str, detail: &str) {
-    let _ = conn.execute(
+    if let Err(e) = conn.execute(
         "INSERT INTO audit_log(actor, op, detail, ts) VALUES (?1,?2,?3,?4)",
         params![actor, op, detail, Utc::now().timestamp()],
-    );
+    ) {
+        acs_core::log::err(format!("审计日志写入失败（op={op} actor={actor}）：{e}"));
+    }
+}
+
+/// 在**同一事务**内执行业务写入与审计写入：任一步失败则整体回滚，
+/// 从根本上避免「操作已生效但没有审计记录」的合规缺口。
+///
+/// `f` 中只应做数据库写入（**不要**在事务内调用 gpg / 网络等阻塞操作，
+/// 否则会持事务锁等外部进程，放大阻塞时间）。
+pub fn with_audit<F>(
+    conn: &mut Connection,
+    actor: &str,
+    op: &str,
+    detail: &str,
+    f: F,
+) -> ApiResult<()>
+where
+    F: FnOnce(&Connection) -> ApiResult<()>,
+{
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(ApiErr::from_err)?;
+    f(&tx)?;
+    tx.execute(
+        "INSERT INTO audit_log(actor, op, detail, ts) VALUES (?1,?2,?3,?4)",
+        params![actor, op, detail, Utc::now().timestamp()],
+    )
+    .map_err(ApiErr::from_err)?;
+    tx.commit().map_err(ApiErr::from_err)?;
+    Ok(())
 }

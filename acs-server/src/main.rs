@@ -7,6 +7,7 @@ mod api;
 mod auth;
 mod crypto;
 mod legal;
+mod password;
 mod state;
 mod sysw;
 mod update;
@@ -40,10 +41,17 @@ async fn main() -> anyhow::Result<()> {
     });
     let cfg = CoreConfig::server_default(data_dir.clone());
     cfg.ensure_dirs()?;
+    // 把数据目录 .env 注入进程环境：使端口 / 品牌 / 迭代次数 / 更新源等
+    // 全部可由 .env 定制（已存在的真实环境变量优先，不被覆盖）。
+    // 必须在读取任何配置之前调用（见 config::load_env_file 的调用时机说明）。
+    let env_loaded = acs_core::config::load_env_file(&cfg.data_dir);
     // 初始化 .alphalog（启动日志，data_dir 下）
     let _ = log::init(&cfg.data_dir);
     log::info(format!("acs-server 启动 v{} 数据目录: {}", acs_core::VERSION, cfg.data_dir.display()));
     println!("[acs-server] 数据目录: {}", cfg.data_dir.display());
+    if env_loaded > 0 {
+        println!("[acs-server] 已从 .env 载入 {env_loaded} 项配置");
+    }
 
     let (gpg_bin, gpg_src) = acs_core::gpg_detect::ensure_gpg()?;
     println!("[acs-server] gpg 来源: {:?} -> {}", gpg_src, gpg_bin.display());
@@ -286,7 +294,8 @@ fn set_console_title() {
     unsafe extern "system" {
         fn SetConsoleTitleW(lpConsoleTitle: *const u16) -> i32;
     }
-    let title: Vec<u16> = "Alpha Coin Central Server"
+    let title: Vec<u16> = acs_core::brand::brand()
+        .server_app
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -352,8 +361,7 @@ fn create_admin(
     role: &str,
     pwd: &str,
 ) -> anyhow::Result<()> {
-    let salt = uuid::Uuid::new_v4().to_string();
-    let pw_hash = format!("{salt}${}", auth::hash_password(pwd, &salt));
+    let pw_hash = password::hash(pwd);
     conn.execute(
         "INSERT INTO admins(uid, role, password_hash, must_change_password, pubkey, encrypted_seckey, fingerprint, key_passphrase_enc, status, created_at) \
          VALUES (?1,?2,?3,1,'','','','','Active',?4)",
@@ -386,19 +394,19 @@ fn seed_systems_from_env(
             continue;
         }
         let gk = gpg
-            .generate_key(&format!("{} <{}@maxshin.top>", s.uid, s.uid), &s.pwd)
+            .generate_key(&acs_core::brand::brand().system_gpg_uid(&s.uid), &s.pwd)
             .map_err(|e| anyhow::anyhow!("生成系统账户密钥失败 {}: {e}", s.uid))?;
-        // 导出加密私钥 + 用主密钥加密 passphrase（本地备份，供技术人员审查）
-        std::fs::write(alpha_dir.join(format!("{}.asc", s.uid)), &gk.encrypted_seckey)?;
+        // 不再向数据目录导出任何密钥文件（.asc / .key）：
+        //   加密私钥 → 入库（accounts_system.encrypted_seckey）
+        //   口令密文 → 入库（accounts_system.key_passphrase_enc，AES-GCM，密钥为 master.key）
         let key_enc = crypto::encrypt_secret(&master_key, &s.pwd);
-        std::fs::write(alpha_dir.join(format!("{}.key", s.uid)), key_enc)?;
         // 创建账户
         account::create_account(
             conn,
             &Account {
                 uid: s.uid.clone(),
                 account_type: AccountType::System,
-                email: format!("{}@maxshin.top", s.uid),
+                email: acs_core::brand::brand().system_email(&s.uid),
                 pubkey: gk.pubkey,
                 encrypted_seckey: gk.encrypted_seckey,
                 balance: 0,
@@ -408,15 +416,14 @@ fn seed_systems_from_env(
                 changed_at: chrono::Utc::now(),
             },
         )?;
-        // 存登录凭证（只存哈希）
-        let salt = uuid::Uuid::new_v4().to_string();
-        let ph = format!("{salt}${}", auth::hash_password(&s.pwd, &salt));
         conn.execute(
-            "INSERT INTO account_credentials(uid, type, password_hash) VALUES (?1,'System',?2) \
-             ON CONFLICT(uid,type) DO UPDATE SET password_hash=excluded.password_hash",
-            rusqlite::params![s.uid, ph],
+            "UPDATE accounts_system SET key_passphrase_enc=?2 WHERE uid=?1",
+            rusqlite::params![s.uid, key_enc],
         )?;
-        println!("[acs-server] 系统账户已创建: {}（登录凭证只存哈希）", s.uid);
+        println!(
+            "[acs-server] 系统账户已创建: {}（密钥材料仅入库，不导出文件；客户端不可登录）",
+            s.uid
+        );
     }
     Ok(())
 }

@@ -1,5 +1,7 @@
 //! 账户数据访问（按账户类型路由到不同中心表；UID 唯一识别，无 abbr）。
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Row};
 
@@ -71,13 +73,26 @@ pub fn account_exists(conn: &Connection, uid: &str, atype: AccountType) -> Resul
     Ok(get_account(conn, uid, atype)?.is_some())
 }
 
-/// 修改账户状态（冻结/解冻/关闭）。
+/// 修改账户状态（冻结/解冻/关闭/注销）。
+///
+/// **终态保护**：`Deleted`（注销）是终态，不可再迁出。
+/// 注销意味着账户与账本只读保留供审计（法律文档已作承诺），
+/// 若允许把 Deleted 改回 Active，等于注销可被撤销、承诺失效。
+/// `Deleted → Deleted` 视为幂等（重复注销不报错）。
 pub fn set_status(
     conn: &Connection,
     uid: &str,
     atype: AccountType,
     status: AccountStatus,
 ) -> Result<()> {
+    let cur = get_account(conn, uid, atype)?
+        .ok_or_else(|| AcsError::AccountNotFound(uid.to_string()))?;
+    if cur.status == AccountStatus::Deleted && status != AccountStatus::Deleted {
+        return Err(AcsError::Message(format!(
+            "账户 {uid} 已注销（Deleted，终态），不可再变更为 {}",
+            status.as_str()
+        )));
+    }
     let table = atype.table_name();
     let sql = format!("UPDATE {table} SET status=?1, changed_at=?2 WHERE uid=?3");
     conn.execute(&sql, params![status.as_str(), Utc::now().timestamp(), uid])?;
@@ -101,9 +116,29 @@ pub fn update_balance_and_hash(
 }
 
 /// 全量重算并回写所有账户余额：balance = Σ(已确认收款) − Σ(已确认支出)。
-/// 只统计状态为 Confirmed 的交易（Pending/Rejected/Error 一律不计），
-/// 从而自动纠正历史结算异常。在“读取余额”类请求前调用即可。
+///
+/// 收支口径**必须与 `transaction::apply_settlement` 逐条对应，不可随意增删**：
+/// - 收入：`Mint` / `Issue` / `Transfer` 的收款方
+/// - 支出：`Redeem` / `Transfer` 的付款方
+/// 之所以不对称：`Issue`（发行）是「商品篮子 → A€」的**增发**，`Redeem`（赎回）是
+/// 「A€ → 商品篮子」的**销毁**；发行账户（PreIssuedAccount）只是记账对手方，
+/// 余额不随二者变动。
+///
+/// 性能：用两条 `GROUP BY` 汇总替代原先「逐账户两条 SUM」，
+/// 复杂度由 O(账户数 × 交易数) 降为 O(交易数 + 账户数)（走 idx_tx_sender/idx_tx_receiver）。
 pub fn recompute_all_balances(conn: &Connection) -> Result<()> {
+    let inc = group_sums(
+        conn,
+        "SELECT receiver, receiver_type, COALESCE(SUM(amount),0) FROM transactions \
+         WHERE status='Confirmed' AND tx_type IN ('Mint','Issue','Transfer') \
+         GROUP BY receiver, receiver_type",
+    )?;
+    let out = group_sums(
+        conn,
+        "SELECT sender, sender_type, COALESCE(SUM(amount),0) FROM transactions \
+         WHERE status='Confirmed' AND tx_type IN ('Redeem','Transfer') \
+         GROUP BY sender, sender_type",
+    )?;
     for at in [
         AccountType::Country,
         AccountType::Company,
@@ -118,30 +153,87 @@ pub fn recompute_all_balances(conn: &Connection) -> Result<()> {
             .filter_map(|r| r.ok())
             .collect();
         for uid in uids {
-            let inc: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(amount),0) FROM transactions \
-                     WHERE receiver=?1 AND receiver_type=?2 AND status='Confirmed' \
-                       AND tx_type IN ('Mint','Issue','Transfer')",
-                    params![uid, st],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            let out: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(amount),0) FROM transactions \
-                     WHERE sender=?1 AND sender_type=?2 AND status='Confirmed' \
-                       AND tx_type IN ('Redeem','Transfer')",
-                    params![uid, st],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            let bal = (inc - out).max(0);
-            let _ = conn.execute(
+            let bal = settle_balance(&inc, &out, &uid, st);
+            conn.execute(
                 &format!("UPDATE {table} SET balance=?1 WHERE uid=?2"),
                 params![bal, uid],
-            );
+            )?;
         }
     }
     Ok(())
+}
+
+/// 重算并回写**单个账户**余额并返回结果（提交交易前刷新发送方余额用）。
+/// 只做两条走索引的 SUM，不触发全库扫描。
+pub fn recompute_account(conn: &Connection, uid: &str, atype: AccountType) -> Result<i64> {
+    let table = atype.table_name();
+    let st = atype.as_str();
+    let inc: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions \
+             WHERE receiver=?1 AND receiver_type=?2 AND status='Confirmed' \
+               AND tx_type IN ('Mint','Issue','Transfer')",
+            params![uid, st],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let out: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions \
+             WHERE sender=?1 AND sender_type=?2 AND status='Confirmed' \
+               AND tx_type IN ('Redeem','Transfer')",
+            params![uid, st],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let mut m = HashMap::new();
+    if inc != 0 {
+        m.insert((uid.to_string(), st.to_string()), inc);
+    }
+    let mut m2 = HashMap::new();
+    if out != 0 {
+        m2.insert((uid.to_string(), st.to_string()), out);
+    }
+    let bal = settle_balance(&m, &m2, uid, st);
+    conn.execute(
+        &format!("UPDATE {table} SET balance=?1 WHERE uid=?2"),
+        params![bal, uid],
+    )?;
+    Ok(bal)
+}
+
+/// 按 (uid, 类型) 取汇总值。
+fn group_sums(conn: &Connection, sql: &str) -> Result<HashMap<(String, String), i64>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut m = HashMap::new();
+    for r in rows {
+        let (k, v) = r?;
+        m.insert(k, v);
+    }
+    Ok(m)
+}
+
+/// 收入 − 支出；负数只可能来自账目异常，按 0 处理并写日志（不再静默掩盖）。
+fn settle_balance(
+    inc: &HashMap<(String, String), i64>,
+    out: &HashMap<(String, String), i64>,
+    uid: &str,
+    atype_str: &str,
+) -> i64 {
+    let key = (uid.to_string(), atype_str.to_string());
+    let i = inc.get(&key).copied().unwrap_or(0);
+    let o = out.get(&key).copied().unwrap_or(0);
+    let diff = i - o;
+    if diff < 0 {
+        crate::log::err(format!(
+            "余额重算异常：{atype_str} 账户 {uid} 支出 {o} 大于收入 {i}（差额 {diff}），已按 0 写入"
+        ));
+    }
+    diff.max(0)
 }

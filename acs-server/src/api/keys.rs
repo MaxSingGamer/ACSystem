@@ -19,13 +19,15 @@ use crate::api::{ApiErr, ApiResult};
 use crate::auth::AuthUser;
 use crate::state::{AppState, CentralState};
 
-/// 铸造（发行）交易的名义发出方：固定的“货币当局”标识。
+/// 铸造（发行）交易的名义发出方：固定的“货币当局”标识（可用 `ACS_MINT_AUTHORITY` 定制）。
 ///
 /// 不再使用管理员登录 UID 作为发出方——否则当管理员 UID 与某个真实账户 UID 同名时
 /// （例如 root 管理员 `Max_Shin` 与个人账户 `Max_Shin`），会在客户端按 UID 归属时串账。
 /// 实际铸造人由审计日志（`log_audit(..., "mint", ...)`）记录。
 /// 该标识不是任何真实账户（不出现在账户表），仅作交易发出方占位。
-const MINT_AUTHORITY_UID: &str = "MintAuthority";
+fn mint_authority_uid() -> String {
+    acs_core::brand::brand().mint_authority.clone()
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -158,13 +160,17 @@ async fn mint(
     if st.pre_issued.is_empty() {
         return Err(ApiErr::bad_request("未配置发行账户（PRE_ISSUED_ACCOUNT）"));
     }
-    let conn = st.db.lock().unwrap();
-    let pre = acs_core::account::require_account(&conn, &st.pre_issued, AccountType::System)
-        .map_err(ApiErr::from)?;
+    // 读链头（只持锁一瞬）——签名是 gpg 子进程、可能耗时数秒，
+    // 必须放在库锁之外，否则会长时间阻塞所有请求。
+    let pre = {
+        let conn = st.db.lock().unwrap();
+        acs_core::account::require_account(&conn, &st.pre_issued, AccountType::System)
+            .map_err(ApiErr::from)?
+    };
 
     let mut tx = Transaction::new(
         TransactionType::Mint,
-        MINT_AUTHORITY_UID.to_string(),
+        mint_authority_uid(),
         AccountType::System,
         st.pre_issued.clone(),
         AccountType::System,
@@ -173,14 +179,10 @@ async fn mint(
     tx.receiver_last_hash = pre.last_tx_hash.clone();
     tx.tx_hash = transaction::compute_tx_hash(&tx);
     tx.central_sig = Some(sign_hash(&st, &auth, &tx.tx_hash)?);
-    drop(conn);
 
     let mut conn = st.db.lock().unwrap();
     transaction::submit_tx(&mut conn, &tx).map_err(ApiErr::from)?;
     let tx_id = tx.tx_id.clone();
-    drop(conn);
-
-    let conn = st.db.lock().unwrap();
     log_audit(&conn, &auth.username, "mint", &format!("+{} -> {}", req.amount, st.pre_issued));
     Ok(Json(json!({ "ok": true, "tx_id": tx_id, "amount": req.amount })))
 }

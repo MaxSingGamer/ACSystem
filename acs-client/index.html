@@ -53,6 +53,17 @@
   .agree input{width:auto; margin-top:2px; accent-color:var(--acc);}
   .agree .mut{color:var(--mut); font-size:11.5px; margin-top:6px;}
 
+  /* 历史账户快捷登录（本机登录过的账户免输 UID） */
+  .acct-list{display:flex; flex-direction:column; gap:8px; max-height:236px; overflow-y:auto; padding:1px;}
+  .acct{display:flex; align-items:center; gap:11px; padding:10px 12px; border:1px solid var(--border); border-radius:14px; background:var(--panel2); cursor:pointer; transition:all .15s;}
+  .acct:hover{border-color:var(--acc);}
+  .acct.on{cursor:default; background:var(--panel); border-color:var(--acc); margin-bottom:14px;}
+  .acct-av{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;flex:none;}
+  .acct-main{flex:1; min-width:0;}
+  .acct-uid{font-weight:600; font-size:13.5px; overflow-wrap:anywhere;}
+  .acct-sub{color:var(--mut); font-size:11.5px; margin-top:2px; overflow-wrap:anywhere;}
+  .acct-when{color:var(--mut); font-size:11px; flex:none; text-align:right;}
+
   /* 主布局 */
   #app{display:grid; grid-template-columns:230px 1fr; min-height:100vh;}
   #sidebar{background:var(--side); color:var(--side-fg); padding:18px 12px; display:flex; flex-direction:column;}
@@ -212,7 +223,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const V = '3.0.0';
+const V = '3.1.0';
 let state = { logged_in:false };
 let view = 'balance';
 let openGroups = {};   // 侧边栏展开的组
@@ -220,10 +231,38 @@ let pendingList = [];
 
 // ---------- 工具 ----------
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function fmtTs(t){ if(!t) return '从未'; const d=new Date(t*1000); return d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+function fmtTs(t){ if(!t) return '从未'; const d=new Date(t*1000); return d.toLocaleString('zh-CN',{year:'2-digit',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 function fmt(n){ return (n??0).toLocaleString(); }
 function fmtMoney(n, sign){ const s=(n??0)<0?'-':''; const v=Math.abs(n??0).toLocaleString(); return (sign && (n??0)>0? '+':'')+s+v; }
 function typeCn(t){ return {Individual:'个人',Company:'企业',Country:'国家',System:'系统'}[t]||t||''; }
+
+// ---------- 品牌化（.env 的 ACS_BRAND_* → 界面文案）----------
+let BR = { name:'Alpha Coin', currency:'A€', client_app:'Alpha Wallet' };
+async function applyBrand(){
+  try{
+    const b = await invoke('brand');
+    if(!b || b.ok===false) return;
+    BR = b;
+    document.title = (b.currency||'A€') + ' 钱包';
+    brandWalk(document.body);
+  }catch(e){ /* 品牌获取失败不影响功能 */ }
+}
+/// 把静态文案里的默认品牌/货币符号换成当前配置（跳过脚本/输入框）
+function brandWalk(root){
+  const skip = ['SCRIPT','STYLE','INPUT','TEXTAREA','OPTION'];
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => (n.parentElement && skip.indexOf(n.parentElement.tagName) >= 0)
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+  });
+  const nodes = []; while(w.nextNode()) nodes.push(w.currentNode);
+  nodes.forEach(n => {
+    const v = String(n.nodeValue)
+      .replace(/Alpha Coin System/g, BR.system_name || 'Alpha Coin System')
+      .replace(/Alpha Coin/g, BR.name || 'Alpha Coin')
+      .replace(/A€/g, BR.currency || 'A€');
+    if(v !== n.nodeValue) n.nodeValue = v;
+  });
+}
 
 // ---------- 主题 ----------
 const PRESETS = { cblue:'经典蓝', emerald:'翡翠绿', wine:'酒红', noir:'曜黑', navy:'深蓝' };
@@ -252,13 +291,17 @@ async function api(path, body){
   if(r && typeof r==='object' && 'message' in r) return { ok:true, message:r.message };
   return { ok:true, message:'', ...(r && typeof r==='object'?r:{}) };
 }
-const API_MAP = { '/api/state':'state','/api/login':'login','/api/register':'register','/api/logout':'logout','/api/sync':'sync','/api/transfer':'transfer','/api/confirm':'confirm','/api/reject':'reject','/api/pending':'pending','/api/set-server':'set_server','/api/delete-account':'delete_account','/api/members':'members' };
+const API_MAP = { '/api/state':'state','/api/ledger':'ledger','/api/login':'login','/api/register':'register','/api/logout':'logout','/api/sync':'sync','/api/transfer':'transfer','/api/confirm':'confirm','/api/reject':'reject','/api/pending':'pending','/api/set-server':'set_server','/api/delete-account':'delete_account','/api/members':'members' };
 function toast(msg, isErr){ const m=$('msgbox'); m.textContent=msg; m.className='msgbox'+(isErr?' err':''); clearTimeout(m._t); m._t=setTimeout(()=>m.classList.add('hidden'),4000); }
 
 // ---------- 登录 ----------
-function authAgreeRender(){
+let authMode='list';   // list=历史账户列表 / pick=已选历史账户 / manual=手动输入 UID
+let authPick=null;     // 选中的历史账户 {uid,type,email,pubkey,last_login}
+function histAccounts(){ return (state.accounts||[]).filter(a=>a && a.uid); }
+
+function authAgreeRender(forceType){
   const wrap=$('auth-agree-wrap'); if(!wrap) return;
-  const type=$('auth-type')?$('auth-type').value:'Individual'; const t=termsDocInfo(type);
+  const type=forceType || ($('auth-type')?$('auth-type').value:'Individual'); const t=termsDocInfo(type);
   const title=type==='Individual'?'A€ 使用协议（个人用户）':'A€ 使用协议（企业 / 成员实体）';
   wrap.innerHTML=`<label><input type="checkbox" id="ag-terms"> 我已阅读并同意 ${docLink(t.kind,title)}</label>
     <label><input type="checkbox" id="ag-privacy"> 我已阅读并同意 ${docLink('privacy','Alpha Coin 隐私政策')}</label>
@@ -266,6 +309,73 @@ function authAgreeRender(){
   bindDocLinks(wrap);
 }
 function agreeChecked(){ return !!($('ag-terms')&&$('ag-terms').checked) && !!($('ag-privacy')&&$('ag-privacy').checked); }
+
+// 登录提交（uidGetter 兼容「选中历史账户」与「手动输入 UID」两种来源）
+function bindLogin(uidGetter){
+  const btn=$('auth-login'); if(!btn) return;
+  btn.onclick=async()=>{
+    const uid=((uidGetter()||'')+'').trim(); const pass=$('auth-pass')?$('auth-pass').value:'';
+    if(!uid){ $('auth-err').textContent='请选择或输入账户 UID'; return; }
+    if(pass.length<8){ $('auth-err').textContent='密码至少 8 位'; return; }
+    if(!agreeChecked()){ $('auth-err').textContent='请先勾选同意《使用协议》与《隐私政策》'; return; }
+    btn.disabled=true;
+    try{
+      const r=await api('/api/login',{uid,password:pass,agreeTerms:true,agreePrivacy:true});
+      if(r.ok){ authPick=null; authMode='list'; view='balance'; await refresh(); toast(r.message); }
+      else { $('auth-err').textContent=r.message; }
+    }catch(e){ $('auth-err').textContent=(e||'')+''; }
+    btn.disabled=false;
+  };
+}
+
+function acctCard(a, clickable){
+  return `<div class="acct${clickable?'':' on'}" data-uid="${esc(a.uid)}">
+    <div class="acct-av">${esc((a.uid||'?').slice(0,1).toUpperCase())}</div>
+    <div class="acct-main"><div class="acct-uid">${esc(a.uid)}</div>
+      <div class="acct-sub">${esc(typeCn(a.type))}${a.email?' · '+esc(a.email):''}</div></div>
+    <div class="acct-when">${a.last_login?esc(fmtTs(a.last_login)):'未登录'}</div></div>`;
+}
+
+// 历史账户列表：本机登录过 = 已存有加密私钥，输密码即可
+function renderAuthList(body, hist){
+  body.innerHTML=`<p class="muted" style="text-align:center;margin:4px 0 10px;">选择本机登录过的账户，输入密码即可</p>
+    <div class="acct-list">${hist.map(a=>acctCard(a,true)).join('')}</div>
+    <div class="btns"><button class="btn ghost" id="auth-other">其他账户</button><button class="btn ghost" id="auth-register">注册新账户</button></div>`;
+  body.querySelectorAll('.acct').forEach(el=>{ el.onclick=()=>{ authPick=hist.find(x=>x.uid===el.dataset.uid)||null; if(authPick){ authMode='pick'; renderAuth(); } }; });
+  $('auth-other').onclick=()=>{ authPick=null; authMode='manual'; renderAuth(); };
+  $('auth-register').onclick=()=>openModal('register',{});
+}
+
+// 已选历史账户：只需密码，无需再输 UID
+function renderAuthPick(body){
+  const a=authPick;
+  body.innerHTML=`${acctCard(a,false)}
+    <label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">
+    <div class="agree" id="auth-agree-wrap"></div>
+    <div class="btns"><button class="btn" id="auth-login">登 录</button><button class="btn ghost" id="auth-back">换个账户</button></div>`;
+  authAgreeRender(a.type);
+  bindLogin(()=>authPick&&authPick.uid);
+  $('auth-back').onclick=()=>{ authPick=null; authMode=histAccounts().length?'list':'manual'; renderAuth(); };
+}
+
+// 手动模式：选类型 + 输 UID（选择不以历史账户登录）
+function renderAuthManual(body){
+  body.innerHTML=`<label>账户类型</label>
+    <select id="auth-type">
+      <option value="Individual">个人账户</option><option value="Company">企业账户（银行）</option>
+      <option value="Country">国家账户</option></select>
+    <div id="auth-uid-wrap"></div>
+    <label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">
+    <div class="agree" id="auth-agree-wrap"></div>
+    <div class="btns"><button class="btn" id="auth-login">登 录</button><button class="btn ghost" id="auth-register">注册新账户</button></div>
+    ${histAccounts().length?'<div class="mut" style="text-align:center;margin-top:12px;"><a id="auth-back">← 返回历史账户</a></div>':''}`;
+  authTypeChange();
+  $('auth-type').onchange=authTypeChange;
+  bindLogin(()=>$('auth-uid')?$('auth-uid').value:'');
+  $('auth-register').onclick=()=>openModal('register',{});
+  const back=$('auth-back'); if(back) back.onclick=()=>{ authMode='list'; authPick=null; renderAuth(); };
+  loadMembersCache().then(authTypeChange);
+}
 
 function renderAuth(){
   const body=$('auth-body');
@@ -279,27 +389,12 @@ function renderAuth(){
     $('auth-saveserver').onclick=async()=>{ const url=($('auth-server').value||'').trim()||'https://acsystem.maxshin.top'; const r=await api('/api/set-server',{url}); if(r.ok){ await refresh(); } else $('auth-err').textContent=r.message; };
     $('auth-err').textContent=''; return;
   }
-  body.innerHTML=`<label>账户类型</label>
-    <select id="auth-type">
-      <option value="Individual">个人账户</option><option value="Company">企业账户（银行）</option>
-      <option value="Country">国家账户</option></select>
-    <div id="auth-uid-wrap"></div>
-    <label>密码</label><input type="password" id="auth-pass" placeholder="≥8 位">
-    <div class="agree" id="auth-agree-wrap"></div>
-    <div class="btns"><button class="btn" id="auth-login">登 录</button><button class="btn ghost" id="auth-register">注册新账户</button></div>`;
-  authTypeChange();
-  $('auth-type').onchange=authTypeChange;
-  $('auth-login').onclick=async()=>{
-    const uid=($('auth-uid').value||'').trim(); const pass=$('auth-pass').value;
-    if(!uid){ $('auth-err').textContent='请输入或选择账户 UID'; return; }
-    if(pass.length<8){ $('auth-err').textContent='密码至少 8 位'; return; }
-    if(!agreeChecked()){ $('auth-err').textContent='请先勾选同意《使用协议》与《隐私政策》'; return; }
-    const r=await api('/api/login',{uid,password:pass,agreeTerms:true,agreePrivacy:true});
-    if(r.ok){ view='balance'; await refresh(); toast(r.message); } else { $('auth-err').textContent=r.message; }
-  };
-  $('auth-register').onclick=()=>openModal('register',{});
+  const hist=histAccounts();
+  if(authMode==='pick' && authPick) renderAuthPick(body);
+  else if(authMode==='manual' || !hist.length) renderAuthManual(body);
+  else renderAuthList(body, hist);
   $('auth-err').textContent='';
-  loadMembersCache().then(authTypeChange);
+  brandWalk(document.body);
 }
 function authTypeChange(){
   const sel=$('auth-type'), wrap=$('auth-uid-wrap'); if(!sel||!wrap) return;
@@ -327,6 +422,7 @@ function render(){
   renderSidebar();
   renderTop();
   renderContent();
+  brandWalk(document.body);
 }
 function renderTop(){
   const u = state.logged_in ? `${state.uid} · ${typeCn(state.atype)}` : '';
@@ -495,7 +591,7 @@ function renderLogout(){
   return `<div class="panel"><h2>退出登录</h2><p class="muted">退出后将返回登录界面；本机账户信息与账本仍保留在本地。</p>
     <div style="margin-top:16px"><button class="btn danger" data-act="logout">确认退出登录</button></div></div>`;
 }
-async function doLogout(){ await api('/api/logout',null); await refresh(); view='balance'; }
+async function doLogout(){ await api('/api/logout',null); authPick=null; authMode='list'; await refresh(); view='balance'; }
 function renderDelete(){
   return `<div class="panel"><h2>注销账户（不可撤销）</h2>
     <p class="muted">注销后：中心账户状态改为「已注销」，账户与账本只读保留供审计，<b>不可再登录</b>；本机记录与密钥将被删除。</p>
@@ -623,6 +719,10 @@ function promptUpdate(info){
 
 async function refresh(){
   state=await api('/api/state');
+  // 账本不再在本地保存副本：登录后按需从中心拉取，仅存内存（state.txs）
+  if(state.logged_in){
+    try{ const l=await api('/api/ledger'); state.txs=(l&&l.txs)||[]; }catch(e){ state.txs=[]; }
+  } else { state.txs=[]; }
   renderAuth();
   if(!state.logged_in) renderAuth();
   ensureAutoSync();
@@ -634,7 +734,7 @@ $('doc-close').onclick=closeDoc;
 $('btn-theme').onclick=()=>togglePreset();
 $('btn-quit').onclick=()=>quitApp();
 applyPreset();
-refresh().then(()=>maybeBootUpdate());
+applyBrand().then(()=>refresh()).then(()=>maybeBootUpdate());
 </script>
 </body>
 </html>

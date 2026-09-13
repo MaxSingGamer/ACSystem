@@ -1,0 +1,9 @@
+// acs-server.exe 的 Windows 资源文件（由 build.rs 调用 embed-resource 编译）
+//
+// 图标源图：仓库根目录 `icon-server.png`
+// 生成方式：pwsh -File scripts\make-icon.ps1（该脚本目录不入库，产物 ico 已入库）
+//          → acs-server/icons/icon-server.ico
+//
+// 注意：exe 的主图标取自**编号最小的 ICON 资源**，因此这里必须用 ID 1。
+
+1 ICON "icons/icon-server.ico"

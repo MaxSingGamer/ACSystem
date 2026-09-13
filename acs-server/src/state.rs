@@ -28,6 +28,9 @@ pub struct AppState {
     pub pre_issued: String,
     /// 登录失败次数与锁定截止（暴力破解防护），key = 账户 uid。
     pub login_fails: Arc<Mutex<HashMap<String, LoginFail>>>,
+    /// `fetch-key` 限流窗口：key = uid，另用 `__all__` 记录全局计数，值为最近请求时间戳（秒）。
+    /// 为何存在：`fetch-key` 仅凭 uid 就能取回加密私钥（无口令校验），必须防枚举遍历。
+    pub key_fetch_hits: Arc<Mutex<HashMap<String, Vec<i64>>>>,
 }
 
 /// 单个账户的登录失败记录。
@@ -68,10 +71,15 @@ impl AppState {
             audit_unlocked: Arc::new(Mutex::new(HashMap::new())),
             sys_acting: Arc::new(Mutex::new(HashMap::new())),
             gpg,
-            token_ttl_secs: 600, // 10 分钟待机
+            token_ttl_secs: std::env::var("ACS_TOKEN_TTL_SECS")
+                .ok()
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(600), // 默认 10 分钟待机
             data_dir,
             pre_issued,
             login_fails: Arc::new(Mutex::new(HashMap::new())),
+            key_fetch_hits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -90,13 +98,18 @@ CREATE TABLE IF NOT EXISTS admins(
     key_passphrase_enc TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'Active',
     last_login INTEGER NOT NULL DEFAULT 0,
+    -- 登录失败计数与锁定截止时间：持久化，重启不清零（防「重启绕过锁定」）
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    locked_until INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL);
 "#;
 
 pub fn init_server_db(conn: &Connection) -> acs_core::errors::Result<()> {
     conn.execute_batch(SERVER_SCHEMA)?;
-    // 老库补列：admins.last_login
+    // 老库补列
     ensure_column(conn, "admins", "last_login", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "admins", "fail_count", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "admins", "locked_until", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
 }
 

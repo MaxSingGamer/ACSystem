@@ -1,11 +1,16 @@
 [package]
 name = "acs-server"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2024"
+build = "build.rs"
 
 [[bin]]
 name = "acs-server"
 path = "src/main.rs"
+
+[build-dependencies]
+# 嵌入图标等 Windows 资源（build.rs + acs-server.rc）
+embed-resource = "3.0"
 
 [dependencies]
 acs-core = { path = "../acs-core" }
