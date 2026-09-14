@@ -27,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/admin/sys/transfer", post(sys_transfer))
         .route("/api/admin/sys/confirm", post(sys_confirm))
         .route("/api/admin/sys/reject", post(sys_reject))
+        .route("/api/admin/sys/change-password", post(sys_change_password))
         .route("/api/admin/sys/logout", post(sys_logout))
 }
 
@@ -93,42 +94,69 @@ async fn sys_act(
         )));
     }
     // 只持锁读一次（口令验算在锁外做，避免占用全局库锁）
-    let (acc, enc) = {
+    let (acc, enc, ledger_enc, must_change_db) = {
         let conn = st.db.lock().unwrap();
         let acc = account::get_account(&conn, &uid, AccountType::System)
             .map_err(ApiErr::from)?
             .ok_or_else(|| ApiErr::not_found("系统账户不存在"))?;
-        let enc: String = conn
+        let (enc, ledger, must): (String, String, i64) = conn
             .query_row(
-                "SELECT key_passphrase_enc FROM accounts_system WHERE uid=?1",
+                "SELECT key_passphrase_enc, ledger_pw_enc, must_change_password \
+                 FROM accounts_system WHERE uid=?1",
                 rusqlite::params![uid],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap_or_default();
-        (acc, enc)
+        (acc, enc, ledger, must)
     };
     if acc.status != AccountStatus::Active {
         return Err(ApiErr::forbidden("该系统账户非 Active，无法登录账本"));
     }
-    if enc.is_empty() {
-        return Err(ApiErr::internal(
-            "该系统账户未配置口令密文（请检查服务端初始化；旧库需重新生成系统账户）",
-        ));
-    }
     let master = master_key(&st)?;
-    let pass = crate::crypto::decrypt_secret(&enc, &master)
-        .map_err(|e| ApiErr::internal(format!("解密系统账户口令失败：{e}")))?;
-    if !crate::password::ct_eq(&pass, &req.password) {
+    // 口令校验：优先「账本访问口令」密文；旧库遗留（为空）回退为私钥口令密文
+    let legacy = ledger_enc.trim().is_empty();
+    let ok = if legacy {
+        if enc.is_empty() {
+            return Err(ApiErr::internal(
+                "该系统账户未配置口令（请检查服务端初始化；旧库需重新生成系统账户）",
+            ));
+        }
+        let key_pw = crate::crypto::decrypt_secret(&enc, &master)
+            .map_err(|e| ApiErr::internal(format!("解密系统账户口令失败：{e}")))?;
+        crate::password::ct_eq(&key_pw, &req.password)
+    } else {
+        let ledger_pw = crate::crypto::decrypt_secret(&ledger_enc, &master)
+            .map_err(|e| ApiErr::internal(format!("解密账本访问口令失败：{e}")))?;
+        crate::password::ct_eq(&ledger_pw, &req.password)
+    };
+    if !ok {
         crate::auth::register_fail(&st, &lock_key, now);
         return Err(ApiErr::unauthorized("账本账户密码错误"));
     }
     st.login_fails.lock().unwrap().remove(&lock_key);
+    // 旧库遗留：把当前口令封存为「账本访问口令」，并保持「首次登录须改密」
+    let must_change = if legacy {
+        let conn = st.db.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE accounts_system SET ledger_pw_enc=?2, must_change_password=1 \
+             WHERE uid=?1 AND ledger_pw_enc=''",
+            rusqlite::params![uid, crate::crypto::encrypt_secret(&master, &req.password)],
+        );
+        true
+    } else {
+        must_change_db != 0
+    };
     st.sys_acting.lock().unwrap().insert(auth.token.clone(), uid.clone());
     crate::log::info(format!(
-        "系统账本登录：管理员 {} 代管系统账户 {}",
-        auth.username, uid
+        "系统账本登录：管理员 {} 代管系统账户 {}{}",
+        auth.username,
+        uid,
+        if must_change { "（首次登录，须修改账本口令）" } else { "" }
     ));
-    Ok(Json(json!({ "ok": true, "uid": uid, "email": acc.email, "atype": "System" })))
+    Ok(Json(json!({
+        "ok": true, "uid": uid, "email": acc.email, "atype": "System",
+        "must_change_password": must_change
+    })))
 }
 
 /// 当前代管系统账户的账本状态（余额自动重算 + 流水）。
@@ -149,6 +177,13 @@ async fn sys_state(
     let pending = transaction::list_pending_for(&conn, &uid, AccountType::System)
         .map_err(ApiErr::from)?;
     let now = chrono::Utc::now().timestamp();
+    let must_change: i64 = conn
+        .query_row(
+            "SELECT must_change_password FROM accounts_system WHERE uid=?1",
+            rusqlite::params![uid],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     Ok(Json(json!({
         "logged_in": true,
         "uid": acc.uid,
@@ -156,6 +191,7 @@ async fn sys_state(
         "email": acc.email,
         "balance": acc.balance,
         "status": acc.status.as_str(),
+        "must_change_password": must_change != 0,
         "synced_at": now,
         "txs": txs.iter().map(|t| {
             let is_in = t.receiver == uid;
@@ -192,6 +228,7 @@ async fn sys_transfer(
     let Some(uid) = acting_uid(&st, &auth) else {
         return Err(ApiErr::forbidden("请先在后台进入系统账本账户"));
     };
+    ensure_password_changed(&st, &uid)?;
     let to = req.to.trim().to_string();
     let to_type = if req.to_type.trim().is_empty() {
         AccountType::Individual
@@ -285,6 +322,7 @@ async fn sys_confirm(
     let Some(uid) = acting_uid(&st, &auth) else {
         return Err(ApiErr::forbidden("请先在后台进入系统账本账户"));
     };
+    ensure_password_changed(&st, &uid)?;
     // 先签名再取连接锁：sign_system 内部会短暂锁库读口令密文，
     // 若在持有连接锁时调用会触发 std::sync::Mutex 自死锁。
     let receiver_sig = sign_system(&st, &uid, req.tx_id.as_bytes())?;
@@ -303,6 +341,7 @@ async fn sys_reject(
     let Some(uid) = acting_uid(&st, &auth) else {
         return Err(ApiErr::forbidden("请先在后台进入系统账本账户"));
     };
+    ensure_password_changed(&st, &uid)?;
     let mut conn = st.db.lock().unwrap();
     transaction::reject_tx(&mut conn, &req.tx_id, &uid, AccountType::System, &req.reason)
         .map_err(ApiErr::from)?;
@@ -316,6 +355,106 @@ async fn sys_logout(
 ) -> ApiResult<Json<serde_json::Value>> {
     st.sys_acting.lock().unwrap().remove(&auth.token);
     Ok(Json(json!({ "ok": true, "logged_in": false })))
+}
+
+#[derive(Deserialize)]
+pub struct ChangePassReq {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+/// 修改当前代管系统账本账户的**访问口令**（需已进入该账本）。
+///
+/// 只重新封存「账本访问口令」（存 `accounts_system.ledger_pw_enc`，AES-GCM，密钥为 master.key）：
+/// 私钥口令密文 `key_passphrase_enc` 不动 —— 服务端签名仍用 master.key 解封它，
+/// 因此改密不需要重新保管/替换密钥，也不会影响已有签名能力（也不需保存任何口令哈希）。
+async fn sys_change_password(
+    State(st): State<AppState>,
+    auth: AuthUser,
+    Json(req): Json<ChangePassReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(uid) = acting_uid(&st, &auth) else {
+        return Err(ApiErr::forbidden("请先在后台进入系统账本账户"));
+    };
+    if req.new_password.len() < 8 {
+        return Err(ApiErr::bad_request("新口令至少 8 位"));
+    }
+    if req.new_password == req.old_password {
+        return Err(ApiErr::bad_request("新口令不能与原口令相同"));
+    }
+    let now = chrono::Utc::now().timestamp();
+    let lock_key = format!("sys:{uid}");
+    if let Some(wait) = crate::auth::lock_wait(&st, &lock_key, now) {
+        return Err(ApiErr::too_many_requests(format!(
+            "尝试过于频繁，请 {wait} 秒后重试"
+        )));
+    }
+    let (enc, ledger_enc) = {
+        let conn = st.db.lock().unwrap();
+        conn.query_row(
+            "SELECT key_passphrase_enc, ledger_pw_enc FROM accounts_system WHERE uid=?1",
+            rusqlite::params![uid],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(|_| ApiErr::not_found("系统账户不存在"))?
+    };
+    let master = master_key(&st)?;
+    let ok = if ledger_enc.trim().is_empty() {
+        let key_pw = crate::crypto::decrypt_secret(&enc, &master)
+            .map_err(|e| ApiErr::internal(format!("解密系统账户口令失败：{e}")))?;
+        crate::password::ct_eq(&key_pw, &req.old_password)
+    } else {
+        let ledger_pw = crate::crypto::decrypt_secret(&ledger_enc, &master)
+            .map_err(|e| ApiErr::internal(format!("解密账本访问口令失败：{e}")))?;
+        crate::password::ct_eq(&ledger_pw, &req.old_password)
+    };
+    if !ok {
+        crate::auth::register_fail(&st, &lock_key, now);
+        return Err(ApiErr::unauthorized("原口令错误"));
+    }
+    st.login_fails.lock().unwrap().remove(&lock_key);
+    {
+        let conn = st.db.lock().unwrap();
+        // 只重新封存「账本访问口令」；key_passphrase_enc（私钥口令）保持不动，
+        // 因此服务端签名能力不受影响（与 auth.rs 里管理员改密的做法一致）。
+        let new_enc = crate::crypto::encrypt_secret(&master, &req.new_password);
+        conn.execute(
+            "UPDATE accounts_system SET ledger_pw_enc=?2, must_change_password=0, changed_at=?3 \
+             WHERE uid=?1",
+            rusqlite::params![uid, new_enc, now],
+        )
+        .map_err(ApiErr::from_err)?;
+        crate::api::audit::log_audit(
+            &conn,
+            &auth.username,
+            "sys_change_password",
+            &format!("uid={uid}"),
+        );
+    }
+    crate::log::info(format!(
+        "系统账本口令已更新：管理员 {} 修改了 {} 的访问口令",
+        auth.username, uid
+    ));
+    Ok(Json(json!({ "ok": true, "uid": uid, "message": "账本口令已更新" })))
+}
+
+/// 首次登录强制改密：未改密前禁止资金操作（转账 / 确认 / 拒收）。
+fn ensure_password_changed(st: &AppState, uid: &str) -> Result<(), ApiErr> {
+    let must: i64 = {
+        let conn = st.db.lock().unwrap();
+        conn.query_row(
+            "SELECT must_change_password FROM accounts_system WHERE uid=?1",
+            rusqlite::params![uid],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    };
+    if must != 0 {
+        return Err(ApiErr::forbidden(
+            "首次登录须先修改该账本账户口令（左侧菜单「修改密码」）",
+        ));
+    }
+    Ok(())
 }
 
 /// 读取主密钥（数据目录 `master.key`）：用于解密系统账户口令密文。

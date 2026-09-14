@@ -28,28 +28,43 @@ fn tx(tx_type: TransactionType, s: &str, st: AccountType, r: &str, rt: AccountTy
     t
 }
 
+/// 当前余额（读库口径）。
+fn bal(conn: &rusqlite::Connection, uid: &str, atype: AccountType) -> i64 {
+    account::require_account(conn, uid, atype).map(|a| a.balance).unwrap_or(-1)
+}
+
+/// 余额只能来自账本：测试也一律用「已确认的铸造」建底，不手写 balance。
+fn mint_to(
+    conn: &mut rusqlite::Connection,
+    uid: &str,
+    atype: AccountType,
+    amt: i64,
+) -> Result<Transaction> {
+    let mut m = tx(TransactionType::Mint, "root", AccountType::System, uid, atype, amt);
+    m.central_sig = Some("root-sig".into());
+    transaction::submit_tx(conn, &m)?;
+    Ok(m)
+}
+
 #[test]
 fn transfer_needs_confirmation() -> Result<()> {
     let mut conn = rusqlite::Connection::open_in_memory()?;
     db::init_central(&conn)?;
 
-    let mut alice = acc("Alice", AccountType::Individual);
-    alice.balance = 1000;
-    let bob = acc("Bob", AccountType::Individual);
-    account::create_account(&conn, &alice)?;
-    account::create_account(&conn, &bob)?;
+    account::create_account(&conn, &acc("Alice", AccountType::Individual))?;
+    account::create_account(&conn, &acc("Bob", AccountType::Individual))?;
+    let fund = mint_to(&mut conn, "Alice", AccountType::Individual, 1000)?;
 
-    let t = tx(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 300);
+    let t = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 300,
+                       Some(&fund.tx_hash), None);
     transaction::submit_tx(&mut conn, &t)?;
-    // Pending：余额未动
-    let alice2 = account::require_account(&conn, "Alice", AccountType::Individual)?;
-    assert_eq!(alice2.balance, 1000);
-    // 接收方确认（带确认签名）
+    // Pending 即计入余额（v3.1.0）：提交即扣发送方、入接收方
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 700);
+    assert_eq!(bal(&conn, "Bob", AccountType::Individual), 300);
+    // 接收方确认（带确认签名）：金额归属不变，仅状态推进
     transaction::confirm_tx(&mut conn, &t.tx_id, "Bob", AccountType::Individual, "bob-sig")?;
-    let alice3 = account::require_account(&conn, "Alice", AccountType::Individual)?;
-    let bob3 = account::require_account(&conn, "Bob", AccountType::Individual)?;
-    assert_eq!(alice3.balance, 700);
-    assert_eq!(bob3.balance, 300);
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 700);
+    assert_eq!(bal(&conn, "Bob", AccountType::Individual), 300);
     let tx3 = transaction::get_transaction(&conn, &t.tx_id)?.unwrap();
     assert_eq!(tx3.status, TransactionStatus::Confirmed);
     // 确认凭据落库：接收方签名 + 确认时间（拒绝理由字段应为空）
@@ -63,17 +78,20 @@ fn transfer_needs_confirmation() -> Result<()> {
 fn transfer_rejected_by_receiver() -> Result<()> {
     let mut conn = rusqlite::Connection::open_in_memory()?;
     db::init_central(&conn)?;
-    let mut alice = acc("Alice", AccountType::Individual);
-    alice.balance = 1000;
-    let bob = acc("Bob", AccountType::Individual);
-    account::create_account(&conn, &alice)?;
-    account::create_account(&conn, &bob)?;
+    account::create_account(&conn, &acc("Alice", AccountType::Individual))?;
+    account::create_account(&conn, &acc("Bob", AccountType::Individual))?;
+    let fund = mint_to(&mut conn, "Alice", AccountType::Individual, 1000)?;
 
-    let t = tx(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 300);
+    let t = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 300,
+                       Some(&fund.tx_hash), None);
     transaction::submit_tx(&mut conn, &t)?;
+    // Pending 已计入：发送方扣减、接收方入账（拒收前）
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 700);
+    assert_eq!(bal(&conn, "Bob", AccountType::Individual), 300);
     transaction::reject_tx(&mut conn, &t.tx_id, "Bob", AccountType::Individual, "不想收")?;
-    let alice2 = account::require_account(&conn, "Alice", AccountType::Individual)?;
-    assert_eq!(alice2.balance, 1000);
+    // 拒收 → 双方金额自动回退（Rejected 不计入余额）
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 1000);
+    assert_eq!(bal(&conn, "Bob", AccountType::Individual), 0);
     let tx2 = transaction::get_transaction(&conn, &t.tx_id)?.unwrap();
     assert_eq!(tx2.status, TransactionStatus::Rejected);
     // 拒收理由应写入主表（以前写在 tx_confirmations，且从无任何查询读取）
@@ -86,13 +104,12 @@ fn transfer_rejected_by_receiver() -> Result<()> {
 fn only_receiver_can_confirm() -> Result<()> {
     let mut conn = rusqlite::Connection::open_in_memory()?;
     db::init_central(&conn)?;
-    let mut alice = acc("Alice", AccountType::Individual);
-    alice.balance = 1000;
-    let bob = acc("Bob", AccountType::Individual);
-    account::create_account(&conn, &alice)?;
-    account::create_account(&conn, &bob)?;
+    account::create_account(&conn, &acc("Alice", AccountType::Individual))?;
+    account::create_account(&conn, &acc("Bob", AccountType::Individual))?;
+    let fund = mint_to(&mut conn, "Alice", AccountType::Individual, 1000)?;
 
-    let t = tx(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 300);
+    let t = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 300,
+                       Some(&fund.tx_hash), None);
     transaction::submit_tx(&mut conn, &t)?;
     // 发送方不能确认
     assert!(transaction::confirm_tx(&mut conn, &t.tx_id, "Alice", AccountType::Individual, "sig").is_err());
@@ -131,17 +148,16 @@ fn mint_without_sig_rejected() -> Result<()> {
 fn insufficient_balance_rejected_at_confirm() -> Result<()> {
     let mut conn = rusqlite::Connection::open_in_memory()?;
     db::init_central(&conn)?;
-    let mut alice = acc("Alice", AccountType::Individual);
-    alice.balance = 300;
-    let bob = acc("Bob", AccountType::Individual);
-    account::create_account(&conn, &alice)?;
-    account::create_account(&conn, &bob)?;
+    account::create_account(&conn, &acc("Alice", AccountType::Individual))?;
+    account::create_account(&conn, &acc("Bob", AccountType::Individual))?;
 
-    // 提交时余额够（300>=200），确认前被扣空 → 确认时拒绝
-    let t = tx(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 200);
+    // 账本来底 300；提出 200（Pending 即扣款 → 实际只剩 100）
+    let fund = mint_to(&mut conn, "Alice", AccountType::Individual, 300)?;
+    let t = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 200,
+                       Some(&fund.tx_hash), None);
     transaction::submit_tx(&mut conn, &t)?;
-    // 直接改库扣减（模拟并发）
-    conn.execute("UPDATE accounts_individual SET balance=0 WHERE uid='Alice'", [])?;
+    // 模拟「发送方资产被抽空」：删掉铸造那笔（余额重算后 0-200=-200，不可支付）
+    conn.execute("DELETE FROM transactions WHERE tx_id=?1", [fund.tx_id.as_str()])?;
     assert!(transaction::confirm_tx(&mut conn, &t.tx_id, "Bob", AccountType::Individual, "sig").is_err());
     Ok(())
 }
@@ -167,12 +183,11 @@ fn account_types_route_to_own_tables() -> Result<()> {
 fn list_pending_for_receiver() -> Result<()> {
     let mut conn = rusqlite::Connection::open_in_memory()?;
     db::init_central(&conn)?;
-    let mut alice = acc("Alice", AccountType::Individual);
-    alice.balance = 1000;
-    let bob = acc("Bob", AccountType::Individual);
-    account::create_account(&conn, &alice)?;
-    account::create_account(&conn, &bob)?;
-    let t = tx(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 100);
+    account::create_account(&conn, &acc("Alice", AccountType::Individual))?;
+    account::create_account(&conn, &acc("Bob", AccountType::Individual))?;
+    let fund = mint_to(&mut conn, "Alice", AccountType::Individual, 1000)?;
+    let t = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 100,
+                       Some(&fund.tx_hash), None);
     transaction::submit_tx(&mut conn, &t)?;
     let pending = transaction::list_pending_for(&conn, "Bob", AccountType::Individual)?;
     assert_eq!(pending.len(), 1);
@@ -321,8 +336,10 @@ fn issue_and_redeem_are_one_sided() -> Result<()> {
     assert_eq!(account::require_account(&conn, "Alice", AccountType::Individual)?.balance, 300);
 
     // 3) 赎回 100：Alice → 发行账户（销毁，发行账户余额仍不变）
+    //    receiver_head 必须取发行账户当前的链头（＝它上一笔 Issue 的哈希，
+    //    因为发送方链头在**提交**时就已推进）
     let r = tx_chained(TransactionType::Redeem, "Alice", AccountType::Individual,
-                       "PreIssuedAccount", AccountType::System, 100, Some(&i.tx_hash), Some(&m.tx_hash));
+                       "PreIssuedAccount", AccountType::System, 100, Some(&i.tx_hash), Some(&i.tx_hash));
     transaction::submit_tx(&mut conn, &r)?;
     transaction::confirm_tx(&mut conn, &r.tx_id, "PreIssuedAccount", AccountType::System, "sys-sig")?;
     assert_eq!(account::require_account(&conn, "Alice", AccountType::Individual)?.balance, 200);
@@ -338,40 +355,51 @@ fn issue_and_redeem_are_one_sided() -> Result<()> {
     Ok(())
 }
 
-/// Pending / Rejected 交易一律不计入余额；并锁定「余额只能来自账本」这一不变量
-/// （任何绕过账本直接写 balance 的做法，都会在下一次全量重算时被抹掉）。
+/// 余额口径（v3.1.0 起）：`Pending` 与 `Confirmed` **计入**，`Rejected` / `Error` **不计入**。
+/// 并锁定「余额只能来自账本」这一不变量（任何绕过账本直接写 balance 的做法，
+/// 都会在下一次全量重算时被抹掉）。
 #[test]
-fn recompute_ignores_unconfirmed() -> Result<()> {
+fn balance_counts_pending_but_not_rejected_or_error() -> Result<()> {
     let mut conn = rusqlite::Connection::open_in_memory()?;
     db::init_central(&conn)?;
     account::create_account(&conn, &acc("Alice", AccountType::Individual))?;
     account::create_account(&conn, &acc("Bob", AccountType::Individual))?;
 
     // 用一笔已确认的铸造给 Alice 建底（重算只认账本，不认手工写入的 balance）
-    let mut fund = tx(TransactionType::Mint, "root", AccountType::System,
-                      "Alice", AccountType::Individual, 1000);
-    fund.central_sig = Some("root-sig".into());
-    transaction::submit_tx(&mut conn, &fund)?;
-    assert_eq!(account::require_account(&conn, "Alice", AccountType::Individual)?.balance, 1000);
+    let fund = mint_to(&mut conn, "Alice", AccountType::Individual, 1000)?;
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 1000);
 
     // 手工改余额 → 重算必须把它抹回账本口径（这是设计不变量，不是 bug）
     conn.execute("UPDATE accounts_individual SET balance=999999 WHERE uid='Alice'", [])?;
     account::recompute_all_balances(&conn)?;
-    assert_eq!(account::require_account(&conn, "Alice", AccountType::Individual)?.balance, 1000);
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 1000);
 
-    // Pending 与 Rejected 的转账都不影响余额
+    // 1) Pending 转账 100：提交即扣发送方、入接收方
     let pending = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual,
-                             "Bob", AccountType::Individual, 100,
-                             Some(&fund.tx_hash), None);
+                             "Bob", AccountType::Individual, 100, Some(&fund.tx_hash), None);
     transaction::submit_tx(&mut conn, &pending)?;
-    let rejected = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual,
-                              "Bob", AccountType::Individual, 200,
-                              Some(&fund.tx_hash), None);
-    transaction::submit_tx(&mut conn, &rejected)?;
-    transaction::reject_tx(&mut conn, &rejected.tx_id, "Bob", AccountType::Individual, "不要")?;
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 900);
+    assert_eq!(bal(&conn, "Bob", AccountType::Individual), 100);
 
+    // 2) 拒收 → 双方金额自动回退（Rejected 不计入余额）
+    transaction::reject_tx(&mut conn, &pending.tx_id, "Bob", AccountType::Individual, "不要")?;
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 1000);
+    assert_eq!(bal(&conn, "Bob", AccountType::Individual), 0);
+
+    // 3) 再提一笔 300 → 置为 Error（同样不计入）；链头因拒收已回退到 fund.tx_hash
+    let err = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual,
+                         "Bob", AccountType::Individual, 300, Some(&fund.tx_hash), None);
+    transaction::submit_tx(&mut conn, &err)?;
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 700);
+    assert_eq!(bal(&conn, "Bob", AccountType::Individual), 300);
+    transaction::mark_error(&mut conn, &err.tx_id)?;
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 1000);
+    assert_eq!(bal(&conn, "Bob", AccountType::Individual), 0);
+
+    // 4) 全量重算 / 单账户重算必须与增量口径一致
     account::recompute_all_balances(&conn)?;
-    assert_eq!(account::require_account(&conn, "Alice", AccountType::Individual)?.balance, 1000);
-    assert_eq!(account::require_account(&conn, "Bob", AccountType::Individual)?.balance, 0);
+    assert_eq!(bal(&conn, "Alice", AccountType::Individual), 1000);
+    assert_eq!(account::recompute_account(&conn, "Alice", AccountType::Individual)?, 1000);
+    assert_eq!(account::recompute_account(&conn, "Bob", AccountType::Individual)?, 0);
     Ok(())
 }

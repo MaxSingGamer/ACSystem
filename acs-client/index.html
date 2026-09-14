@@ -521,6 +521,9 @@ function renderInbox(){
 async function loadInbox(){
   const el=$('inboxList'); if(!el) return;
   let items=[]; try{ const r=await api('/api/pending'); items=r.items||[]; }catch(e){ el.innerHTML='<p class="muted">加载失败：'+(e||'')+'</p>'; return; }
+  // 必须写回全局：pendingAction() 按序号从 pendingList 取待确认交易
+  // （此前只用于局部渲染，导致点「接受/拒收」时 pendingList[i] 为 undefined，静默无反应）
+  pendingList = items;
   if(!items.length){ el.innerHTML='<p class="muted">当前没有待确认交易。</p>'; return; }
   el.innerHTML=`<table><thead><tr><th>发送方</th><th>类型</th><th>金额</th><th>时间</th><th style="width:140px">操作</th></tr></thead><tbody>`+
     items.map((it,i)=>`<tr><td class="mono">${esc(it.sender)}</td><td>${esc(it.tx_type)}</td><td class="mono">${fmt(it.amount)} A€</td><td>${fmtTs(it.timestamp)}</td>
@@ -674,7 +677,9 @@ function openModal(kind,data){
 }
 function closeModal(){ $('modal-wrap').classList.add('hidden'); }
 function pendingAction(i, act){
-  const it=pendingList[i]; if(!it) return;
+  const it=pendingList[i];
+  // 不再静默返回：列表可能已被刷新（序号失效），给出可见提示
+  if(!it){ toast('待确认交易已变化，请刷新后重试', true); return; }
   const title=$('modal-title'), body=$('modal-body'), err=$('modal-error'); const ok=$('modal-ok'), cancel=$('modal-cancel');
   const isReject=act==='reject'; title.textContent=isReject?'拒收交易':'确认收款'; err.textContent='';
   body.innerHTML=`<p class="muted" style="margin-bottom:12px;">${esc(it.sender)} → 我 · ${esc(it.tx_type)} · <b>${fmt(it.amount)} A€</b>（${fmtTs(it.timestamp)}）</p>

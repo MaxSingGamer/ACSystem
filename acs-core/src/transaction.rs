@@ -183,7 +183,9 @@ pub fn submit_tx(conn: &mut Connection, tx: &Transaction) -> Result<()> {
         return Err(AcsError::AccountNotActive);
     }
     if tx.tx_type == TransactionType::Transfer || tx.tx_type == TransactionType::Redeem {
-        if sender.balance < tx.amount {
+        // 余额口径含 Pending，故这里已扣除「其他待确认转账」，重复花费会被拦下。
+        // 用 raw_balance：它不把透支夹取为 0。
+        if crate::account::raw_balance(&db, &tx.sender, tx.sender_type)? < tx.amount {
             return Err(AcsError::InsufficientBalance);
         }
     }
@@ -191,6 +193,14 @@ pub fn submit_tx(conn: &mut Connection, tx: &Transaction) -> Result<()> {
         return Err(AcsError::HashMismatch("发送方链头不一致".into()));
     }
     insert_transaction(&db, tx)?;
+    // Pending 即计入余额（v3.1.0）：
+    // - 推进发送方链头（否则同一发送方的连续待确认转账会重复用同一链头）
+    // - 重算双方余额（发送方立即扣减、接收方立即入账；被拒收时再回退）
+    crate::account::set_last_hash(&db, &tx.sender, tx.sender_type, Some(tx.tx_hash.as_str()))?;
+    crate::account::recompute_account(&db, &tx.sender, tx.sender_type)?;
+    if crate::account::account_exists(&db, &tx.receiver, tx.receiver_type)? {
+        crate::account::recompute_account(&db, &tx.receiver, tx.receiver_type)?;
+    }
     db.commit()?;
     Ok(())
 }
@@ -216,11 +226,27 @@ pub fn confirm_tx(
     if tx.receiver != actor_uid || tx.receiver_type != actor_type {
         return Err(AcsError::Unauthorized("仅接收方可确认该交易".into()));
     }
-    apply_settlement(&db, &tx)?;
+    // 确认不再做增量结算：Pending 阶段已计入双方余额、并已推进发送方链头。
+    // 这里只做与结算同等的校验，然后置为 Confirmed 并推进接收方链头。
+    let receiver = crate::account::require_account(&db, &tx.receiver, tx.receiver_type)?;
+    if receiver.status != AccountStatus::Active {
+        return Err(AcsError::AccountNotActive);
+    }
+    if receiver.last_tx_hash.as_deref() != tx.receiver_last_hash.as_deref() {
+        return Err(AcsError::HashMismatch("接收方链头不一致".into()));
+    }
+    if matches!(tx.tx_type, TransactionType::Transfer | TransactionType::Redeem) {
+        // 复核发送方可支付性（口径含本笔扣减，透支即拒绝；raw_balance 不夹取负值）
+        if crate::account::raw_balance(&db, &tx.sender, tx.sender_type)? < 0 {
+            return Err(AcsError::InsufficientBalance);
+        }
+    }
     db.execute(
         "UPDATE transactions SET status='Confirmed', receiver_sig=?1, confirmed_at=?2 WHERE tx_id=?3",
         params![receiver_sig, chrono::Utc::now().timestamp(), tx_id],
     )?;
+    crate::account::set_last_hash(&db, &tx.receiver, tx.receiver_type, Some(tx.tx_hash.as_str()))?;
+    crate::account::recompute_account(&db, &tx.receiver, tx.receiver_type)?;
     db.commit()?;
     Ok(())
 }
@@ -244,6 +270,8 @@ pub fn reject_tx(
         "UPDATE transactions SET status='Rejected', reject_reason=?1, confirmed_at=?2 WHERE tx_id=?3",
         params![reason, chrono::Utc::now().timestamp(), tx_id],
     )?;
+    // 该笔不再计入余额：回退发送方链头 + 重算双方（金额自动回退）
+    rollback_pending(&db, &tx)?;
     db.commit()?;
     Ok(())
 }
@@ -263,7 +291,21 @@ pub fn mark_error(
         "UPDATE transactions SET status='Error', reject_reason='error', confirmed_at=?1 WHERE tx_id=?2",
         params![chrono::Utc::now().timestamp(), tx_id],
     )?;
+    rollback_pending(&db, &tx)?;
     db.commit()?;
+    Ok(())
+}
+
+/// 把一笔 Pending 交易从账本口径中撒下：回退发送方链头并重算双方余额。
+/// 用于拒收 / 置错（金额不再计入余额）。
+fn rollback_pending(conn: &Connection, tx: &Transaction) -> Result<()> {
+    if crate::account::account_exists(conn, &tx.sender, tx.sender_type)? {
+        crate::account::set_last_hash(conn, &tx.sender, tx.sender_type, tx.sender_last_hash.as_deref())?;
+        crate::account::recompute_account(conn, &tx.sender, tx.sender_type)?;
+    }
+    if crate::account::account_exists(conn, &tx.receiver, tx.receiver_type)? {
+        crate::account::recompute_account(conn, &tx.receiver, tx.receiver_type)?;
+    }
     Ok(())
 }
 
@@ -275,7 +317,7 @@ pub fn is_terminal(status: TransactionStatus) -> bool {
     )
 }
 
-/// 按类型执行账本结算（内部，须在事务内调用）。
+/// Mint 专用入账（其余类型走 Pending → 确认流程，**不要**在此再做增量结算）。
 /// 注意：Mint 的发送方为根管理员（非账本账户），不校验发送方。
 fn apply_settlement(conn: &Connection, tx: &Transaction) -> Result<()> {
     let receiver = crate::account::require_account(conn, &tx.receiver, tx.receiver_type)?;
@@ -299,38 +341,11 @@ fn apply_settlement(conn: &Connection, tx: &Transaction) -> Result<()> {
                 conn, &tx.receiver, tx.receiver_type, receiver.balance + tx.amount, hash,
             )?;
         }
-        TransactionType::Redeem => {
-            let sender = crate::account::require_account(conn, &tx.sender, tx.sender_type)?;
-            if sender.status != AccountStatus::Active {
-                return Err(AcsError::AccountNotActive);
-            }
-            if sender.balance < tx.amount {
-                return Err(AcsError::InsufficientBalance);
-            }
-            if sender.last_tx_hash.as_deref() != tx.sender_last_hash.as_deref() {
-                return Err(AcsError::HashMismatch("发送方链头不一致".into()));
-            }
-            crate::account::update_balance_and_hash(
-                conn, &tx.sender, tx.sender_type, sender.balance - tx.amount, hash,
-            )?;
-        }
-        TransactionType::Transfer => {
-            let sender = crate::account::require_account(conn, &tx.sender, tx.sender_type)?;
-            if sender.status != AccountStatus::Active {
-                return Err(AcsError::AccountNotActive);
-            }
-            if sender.balance < tx.amount {
-                return Err(AcsError::InsufficientBalance);
-            }
-            if sender.last_tx_hash.as_deref() != tx.sender_last_hash.as_deref() {
-                return Err(AcsError::HashMismatch("发送方链头不一致".into()));
-            }
-            crate::account::update_balance_and_hash(
-                conn, &tx.sender, tx.sender_type, sender.balance - tx.amount, hash,
-            )?;
-            crate::account::update_balance_and_hash(
-                conn, &tx.receiver, tx.receiver_type, receiver.balance + tx.amount, hash,
-            )?;
+        // Transfer / Redeem 不再走这里（提交即为 Pending 并计入余额，确认时只改状态）
+        TransactionType::Transfer | TransactionType::Redeem => {
+            return Err(AcsError::Message(
+                "内部错误：Transfer/Redeem 不应走 Mint 结算路径".into(),
+            ));
         }
     }
     Ok(())

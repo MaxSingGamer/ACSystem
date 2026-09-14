@@ -400,6 +400,8 @@ fn seed_systems_from_env(
         //   加密私钥 → 入库（accounts_system.encrypted_seckey）
         //   口令密文 → 入库（accounts_system.key_passphrase_enc，AES-GCM，密钥为 master.key）
         let key_enc = crypto::encrypt_secret(&master_key, &s.pwd);
+        // 账本访问口令：与私钥口令分开封存（首次登录必须修改）
+        let ledger_enc = crypto::encrypt_secret(&master_key, &s.pwd);
         // 创建账户
         account::create_account(
             conn,
@@ -417,11 +419,11 @@ fn seed_systems_from_env(
             },
         )?;
         conn.execute(
-            "UPDATE accounts_system SET key_passphrase_enc=?2 WHERE uid=?1",
-            rusqlite::params![s.uid, key_enc],
+            "UPDATE accounts_system SET key_passphrase_enc=?2, ledger_pw_enc=?3, must_change_password=1 WHERE uid=?1",
+            rusqlite::params![s.uid, key_enc, ledger_enc],
         )?;
         println!(
-            "[acs-server] 系统账户已创建: {}（密钥材料仅入库，不导出文件；客户端不可登录）",
+            "[acs-server] 系统账户已创建: {}（密钥材料仅入库，不导出文件；客户端不可登录；首次登录须修改账本口令）",
             s.uid
         );
     }

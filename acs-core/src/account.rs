@@ -115,9 +115,28 @@ pub fn update_balance_and_hash(
     Ok(())
 }
 
-/// 全量重算并回写所有账户余额：balance = Σ(已确认收款) − Σ(已确认支出)。
+/// 仅更新账本链头（余额统一交给 `recompute_account` / `recompute_all_balances`）。
+/// 语义（与余额口径配套）：交易一提交（Pending）就推进**发送方**链头，
+/// 接收方链头在确认时推进；被拒收/置错时发送方链头回退到 `sender_last_hash`。
+pub fn set_last_hash(
+    conn: &Connection,
+    uid: &str,
+    atype: AccountType,
+    last_tx_hash: Option<&str>,
+) -> Result<()> {
+    let table = atype.table_name();
+    let sql = format!("UPDATE {table} SET last_tx_hash=?1, changed_at=?2 WHERE uid=?3");
+    conn.execute(&sql, params![last_tx_hash, Utc::now().timestamp(), uid])?;
+    Ok(())
+}
+
+/// 全量重算并回写所有账户余额：balance = Σ(计入的收款) − Σ(计入的支出)。
 ///
-/// 收支口径**必须与 `transaction::apply_settlement` 逐条对应，不可随意增删**：
+/// **计入口径（v3.1.0 起）**：`Pending` 与 `Confirmed` 均计入，`Rejected` / `Error` 不计入。
+/// 即：转出一提交（Pending）就立即扣减发送方余额（防止同一笔钱被重复花出），
+/// 收款方在待确认阶段即计入余额（若对方拒收，则该笔交易状态转为 Rejected，双方余额自动回退）。
+///
+/// 收支口径**必须与 `transaction` 里的结算/入账逻辑逐条对应，不可随意增删**：
 /// - 收入：`Mint` / `Issue` / `Transfer` 的收款方
 /// - 支出：`Redeem` / `Transfer` 的付款方
 /// 之所以不对称：`Issue`（发行）是「商品篮子 → A€」的**增发**，`Redeem`（赎回）是
@@ -130,13 +149,13 @@ pub fn recompute_all_balances(conn: &Connection) -> Result<()> {
     let inc = group_sums(
         conn,
         "SELECT receiver, receiver_type, COALESCE(SUM(amount),0) FROM transactions \
-         WHERE status='Confirmed' AND tx_type IN ('Mint','Issue','Transfer') \
+         WHERE status IN ('Pending','Confirmed') AND tx_type IN ('Mint','Issue','Transfer') \
          GROUP BY receiver, receiver_type",
     )?;
     let out = group_sums(
         conn,
         "SELECT sender, sender_type, COALESCE(SUM(amount),0) FROM transactions \
-         WHERE status='Confirmed' AND tx_type IN ('Redeem','Transfer') \
+         WHERE status IN ('Pending','Confirmed') AND tx_type IN ('Redeem','Transfer') \
          GROUP BY sender, sender_type",
     )?;
     for at in [
@@ -165,13 +184,14 @@ pub fn recompute_all_balances(conn: &Connection) -> Result<()> {
 
 /// 重算并回写**单个账户**余额并返回结果（提交交易前刷新发送方余额用）。
 /// 只做两条走索引的 SUM，不触发全库扫描。
+/// 计入口径与 `recompute_all_balances` 一致：`Pending` + `Confirmed` 计入，`Rejected`/`Error` 不计入。
 pub fn recompute_account(conn: &Connection, uid: &str, atype: AccountType) -> Result<i64> {
     let table = atype.table_name();
     let st = atype.as_str();
     let inc: i64 = conn
         .query_row(
             "SELECT COALESCE(SUM(amount),0) FROM transactions \
-             WHERE receiver=?1 AND receiver_type=?2 AND status='Confirmed' \
+             WHERE receiver=?1 AND receiver_type=?2 AND status IN ('Pending','Confirmed') \
                AND tx_type IN ('Mint','Issue','Transfer')",
             params![uid, st],
             |r| r.get(0),
@@ -180,7 +200,7 @@ pub fn recompute_account(conn: &Connection, uid: &str, atype: AccountType) -> Re
     let out: i64 = conn
         .query_row(
             "SELECT COALESCE(SUM(amount),0) FROM transactions \
-             WHERE sender=?1 AND sender_type=?2 AND status='Confirmed' \
+             WHERE sender=?1 AND sender_type=?2 AND status IN ('Pending','Confirmed') \
                AND tx_type IN ('Redeem','Transfer')",
             params![uid, st],
             |r| r.get(0),
@@ -200,6 +220,32 @@ pub fn recompute_account(conn: &Connection, uid: &str, atype: AccountType) -> Re
         params![bal, uid],
     )?;
     Ok(bal)
+}
+
+/// 原始净额（收入 − 支出，**不把负值夹取为 0**）：用于「可支付性」判定。
+/// 口径与 `recompute_account` 完全一致（Pending + Confirmed 计入，Rejected/Error 不计入），
+/// 仅不做负值兜底 —— 否则透支会被看成「余额 0」而无法识别。
+pub fn raw_balance(conn: &Connection, uid: &str, atype: AccountType) -> Result<i64> {
+    let st = atype.as_str();
+    let inc: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions \
+             WHERE receiver=?1 AND receiver_type=?2 AND status IN ('Pending','Confirmed') \
+               AND tx_type IN ('Mint','Issue','Transfer')",
+            params![uid, st],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let out: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions \
+             WHERE sender=?1 AND sender_type=?2 AND status IN ('Pending','Confirmed') \
+               AND tx_type IN ('Redeem','Transfer')",
+            params![uid, st],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(inc - out)
 }
 
 /// 按 (uid, 类型) 取汇总值。

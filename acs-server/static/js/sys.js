@@ -1,6 +1,6 @@
 // 系统账本账户登录 / 钱包操作（后台代管系统账户，功能与 Alpha Wallet 客户端一致）。
 // 复用 common.js 的 api()/TOKEN/$/esc/fmt/typeName/tsFmt 与主题。
-const NAV = [['overview', '概览'], ['send', '转账'], ['inbox', '待收箱'], ['txs', '流水']];
+const NAV = [['overview', '概览'], ['send', '转账'], ['inbox', '待收箱'], ['txs', '流水'], ['password', '修改密码']];
 let view = 'overview';
 let acting = null;
 let st = null;
@@ -84,6 +84,8 @@ async function enter(uid) {
   st = await loadState();
   $('pickView').style.display = 'none';
   $('walletView').style.display = 'flex';
+  // 首次登录强制改密：直接落到「修改密码」页；未改密前服务端会拦截转账/确认/拒收
+  if (st && st.must_change_password) view = 'password';
   renderNav();
   renderView();
 }
@@ -109,7 +111,8 @@ function renderNav() {
   const nav = $('wnav');
   nav.innerHTML = NAV.map(([k, l]) => `<div class="it ${view === k ? 'on' : ''}" data-v="${k}">${l}</div>`).join('') +
     '<div class="it" style="color:var(--red)" id="nav-quit">退出账本</div>';
-  nav.querySelectorAll('.it[data-v]').forEach(el => el.onclick = () => { view = el.dataset.v; renderView(); });
+  // 切换视图时必须重绘导航，否则「选中框」（.on）留在上一次的项上
+  nav.querySelectorAll('.it[data-v]').forEach(el => el.onclick = () => { view = el.dataset.v; renderNav(); renderView(); });
   $('nav-quit').onclick = async () => {
     try { await api('/api/admin/sys/logout', { method: 'POST' }); } catch (e) {}
     location.reload();
@@ -117,11 +120,47 @@ function renderNav() {
 }
 
 function renderView() {
-  const map = { overview: vOverview, send: vSend, inbox: vInbox, txs: vTxs };
+  const map = { overview: vOverview, send: vSend, inbox: vInbox, txs: vTxs, password: vPassword };
   const el = $('wmain');
   el.innerHTML = (map[view] || vOverview)();
   if (view === 'send') bindSend();
   if (view === 'inbox') bindInbox();
+  if (view === 'password') bindPassword();
+}
+
+/// 修改账本账户访问口令（首次登录必须改）。
+/// 只改访问口令；中心侧签名密钥（key_passphrase_enc）不受影响。
+function vPassword() {
+  const must = !!(st && st.must_change_password);
+  return `<div class="panel"><h2>修改账本口令</h2>
+    ${must
+      ? '<p class="muted" style="color:var(--red);font-weight:600">首次登录：必须修改初始口令后，才能进行转账 / 确认 / 拒收。</p>'
+      : '<p class="muted">仅修改该账本账户的访问口令（进入账本时输入的那个），不影响中心侧的签名密钥。</p>'}
+    <div class="field"><label>原口令</label><input id="p-old" type="password" autocomplete="new-password"></div>
+    <div class="field"><label>新口令（≥8 位）</label><input id="p-new" type="password" autocomplete="new-password"></div>
+    <div class="field"><label>确认新口令</label><input id="p-new2" type="password" autocomplete="new-password"></div>
+    <div class="row"><button class="btn-primary" id="p-go">确认修改</button><span class="muted" id="p-msg" style="margin-left:8px"></span></div></div>`;
+}
+function bindPassword() {
+  const go = $('p-go');
+  if (!go) return;
+  go.onclick = async () => {
+    const oldP = $('p-old').value, newP = $('p-new').value, new2 = $('p-new2').value;
+    const msg = $('p-msg');
+    if (!oldP) { msg.textContent = '请输入原口令'; return; }
+    if (newP.length < 8) { msg.textContent = '新口令至少 8 位'; return; }
+    if (newP !== new2) { msg.textContent = '两次输入的新口令不一致'; return; }
+    msg.textContent = '提交中…';
+    try {
+      const r = await api('/api/admin/sys/change-password', {
+        method: 'POST', body: JSON.stringify({ old_password: oldP, new_password: newP })
+      });
+      msg.textContent = r.message || '已修改';
+      // 改密后刷新状态，must_change_password 应变为 false
+      await refreshState();
+      if (st && !st.must_change_password) { view = 'overview'; renderNav(); renderView(); }
+    } catch (e) { msg.textContent = (e.message || e); }
+  };
 }
 
 function dirSign(t) { return t.direction >= 0 ? '+' : '-'; }

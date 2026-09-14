@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS accounts_individual(
 -- 系统账户（PreIssuedAccount / AESystem / AlphaEU）
 -- 注：密钥材料只入库，不再向数据目录导出 .asc/.key 文件；
 --     key_passphrase_enc = 系统账户私钥口令的密文（AES-GCM，密钥为数据目录 master.key），仅服务端代管签名时使用。
+--     ledger_pw_enc      = 账本访问口令的密文（后台进入该账本时输入的口令，同样用 master.key 封存，**不存哈希**）；
+--                          留空 = 旧库遗留，回退为校验 key_passphrase_enc 解出的私钥口令（登录成功后自动补写）。
+--                          访问口令与私钥口令分离：改访问口令不影响中心侧签名能力。
+--     must_change_password = 1 表示首次登录必须修改账本口令（种子创建时置 1）。
 CREATE TABLE IF NOT EXISTS accounts_system(
     uid TEXT PRIMARY KEY, email TEXT NOT NULL,
     pubkey TEXT NOT NULL, encrypted_seckey TEXT NOT NULL,
@@ -62,7 +66,9 @@ CREATE TABLE IF NOT EXISTS accounts_system(
     last_tx_hash TEXT, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL,
     last_login INTEGER NOT NULL DEFAULT 0,
     agree_terms INTEGER NOT NULL DEFAULT 0, agree_privacy INTEGER NOT NULL DEFAULT 0,
-    key_passphrase_enc TEXT NOT NULL DEFAULT '');
+    key_passphrase_enc TEXT NOT NULL DEFAULT '',
+    ledger_pw_enc TEXT NOT NULL DEFAULT '',
+    must_change_password INTEGER NOT NULL DEFAULT 0);
 
 -- 统一交易总账
 -- 时间语义：ts = 客户端声明时间（保留原值，参与 tx_hash）；received_at = 服务端收到时间（权威、不可伪造）。
@@ -189,6 +195,16 @@ pub fn migrate_center(conn: &Connection) -> Result<()> {
     }
     // 系统账户：口令密文列（密钥材料只入库，不再导出 .asc/.key 文件）
     ensure_col(conn, "accounts_system", "key_passphrase_enc", "TEXT NOT NULL DEFAULT ''")?;
+    // v3.1.0：系统账户账本访问口令（封存）+ 首次登录强制改密标记
+    // 注：不使用 password_hash 列 —— 本版的原则是不保存任何口令哈希，
+    //     这里与 key_passphrase_enc 一样只存 AES-GCM 密文（密钥为 master.key）。
+    ensure_col(conn, "accounts_system", "ledger_pw_enc", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_col(
+        conn,
+        "accounts_system",
+        "must_change_password",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     // 合并 account_credentials → accounts_*（老库升级），随后删除旧表
     // 注：旧表里的 password_hash 一律丢弃（不再保存任何口令哈希）
     if table_exists(conn, "account_credentials") {
