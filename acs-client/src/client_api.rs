@@ -17,6 +17,21 @@ fn base(w: &Wallet) -> Result<String> {
     Ok(url.to_string())
 }
 
+/// 统一 HTTP 错误文案：`HTTP <状态码> : <原因>`。
+/// 原因取自服务端错误体 `{"error":"..."}`；解析不出来就回退为响应原文（去空白）。
+fn http_err(code: u16, body: &str) -> String {
+    let reason = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or_else(|| body.trim().to_string());
+    let reason = if reason.trim().is_empty() {
+        "请求被拒绝".to_string()
+    } else {
+        reason.trim().to_string()
+    };
+    format!("HTTP {code} : {reason}")
+}
+
 /// 开立账户：导出钱包公钥，连同“用户口令加密的私钥”上传到中心（支持多设备登录）。
 /// **不上传任何口令哈希**（口令不落库、不传输）。
 /// v3.1.0：须携带已同意《使用协议》/《隐私政策》标识，未同意服务端驳回注册。
@@ -57,7 +72,7 @@ pub fn open_account(
         }
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            let m = anyhow!("中心返回 HTTP {code}: {text}");
+            let m = anyhow!("{}", http_err(code, &text));
             acs_core::log::err(&m.to_string());
             Err(m)
         }
@@ -101,7 +116,7 @@ pub fn fetch_key(
         }
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            let m = anyhow!("中心返回 HTTP {code}: {text}");
+            let m = anyhow!("{}", http_err(code, &text));
             acs_core::log::err(&m.to_string());
             Err(m)
         }
@@ -124,7 +139,7 @@ pub fn fetch_members(w: &Wallet) -> Result<serde_json::Value> {
         Ok(resp) => Ok(resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?),
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+            Err(anyhow!("{}", http_err(code, &text)))
         }
         Err(e) => Err(anyhow!("连接失败：{e}")),
     }
@@ -154,7 +169,7 @@ pub fn close_account(w: &Wallet, passphrase: &str) -> Result<serde_json::Value> 
         Ok(resp) => Ok(resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?),
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+            Err(anyhow!("{}", http_err(code, &text)))
         }
         Err(e) => Err(anyhow!("连接失败：{e}")),
     }
@@ -214,7 +229,7 @@ pub fn submit_outbox(w: &Wallet, tx_id: Option<&str>) -> Result<Vec<(String, Str
                 let text = resp
                     .into_string()
                     .unwrap_or_default();
-                results.push((id.clone(), format!("中心拒绝(HTTP {code}): {text}")));
+                results.push((id.clone(), http_err(code, &text)));
             }
             Err(e) => {
                 results.push((id.clone(), format!("连接失败：{e}")));
@@ -258,7 +273,7 @@ pub fn submit_signed_tx(w: &Wallet, tx_id: &str) -> Result<serde_json::Value> {
         }
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+            Err(anyhow!("{}", http_err(code, &text)))
         }
         Err(e) => Err(anyhow!("连接失败：{e}")),
     }
@@ -333,7 +348,7 @@ pub fn confirm_tx(
         Ok(resp) => Ok(resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?),
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            Err(anyhow!("中心返回 HTTP {code}: {text}"))
+            Err(anyhow!("{}", http_err(code, &text)))
         }
         Err(e) => Err(anyhow!("连接失败：{e}")),
     }

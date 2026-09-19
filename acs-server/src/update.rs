@@ -201,7 +201,7 @@ pub struct DownloadReq {
     pub platform: String,
 }
 
-/// GET /api/client/update/download?version=3.1.0&platform=windows-x64
+/// GET /api/client/update/download?version=3.2.0&platform=windows-x64
 /// 仅当清单中登记该版本/平台的安装包时才从服务器 updates/ 目录流式返回。
 async fn download(
     State(st): State<AppState>,

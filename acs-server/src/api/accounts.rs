@@ -178,7 +178,8 @@ async fn delete_account(
     }
     let atype = AccountType::from_str(&atype_s).ok_or_else(|| ApiErr::bad_request("未知账户类型"))?;
     let mut conn = st.db.lock().unwrap();
-    // 软删除：状态改为 Deleted（账户信息与账本只读保留，供审计），而非物理删除
+    // 软删除：状态改为 Deleted（账户信息与账本只读保留，供审计），而非物理删除；
+    // 同时删除口令加密的私钥密文（云端仅保留公钥）
     with_audit(
         &mut conn,
         &auth.username,
@@ -186,6 +187,7 @@ async fn delete_account(
         &format!("注销账户: {} {uid}", atype.as_str()),
         |c| {
             account::set_status(c, &uid, atype, AccountStatus::Deleted).map_err(ApiErr::from)?;
+            account::purge_secret(c, &uid, atype).map_err(ApiErr::from)?;
             Ok(())
         },
     )?;

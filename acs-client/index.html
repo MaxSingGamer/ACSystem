@@ -223,7 +223,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const V = '3.1.0';
+const V = '3.2.0';
 let state = { logged_in:false };
 let view = 'balance';
 let openGroups = {};   // 侧边栏展开的组
@@ -456,7 +456,7 @@ function toggleGroup(name){
 function renderContent(){
   const c=$('content');
   const fn = RENDER[view] || renderBalance;
-  c.innerHTML = fn();
+  c.innerHTML = viewBanner() + fn();
   bindDocLinks(c);
   c.querySelectorAll('button[data-act]').forEach(b=>{ b.onclick=()=>runAction(b.dataset.act, b.dataset); });
   c.querySelectorAll('.month-head,.day-head').forEach(h=>{ h.onclick=()=>h.parentNode.classList.toggle('open'); });
@@ -465,6 +465,13 @@ function renderContent(){
 }
 
 // ---------- 视图 ----------
+/// 账户状态横幅：Frozen / Deleted / Closed 时置顶提示「不可交易」（服务端同样会拒绝）
+function viewBanner(){
+  const s = state.status || 'Active';
+  if(s === 'Active') return '';
+  const m = { Frozen:'账户已被冻结，不可进行交易', Deleted:'账户已注销，不可进行交易', Closed:'账户已关闭，不可进行交易' }[s] || ('账户状态异常（'+s+'），不可进行交易');
+  return `<div class="panel" style="border-color:var(--err);color:var(--err);font-weight:600">⚠ ${esc(m)}</div>`;
+}
 function renderBalance(){
   return `<div class="balance-hero"><div class="k">账户余额（中心口径）</div><div class="v">${fmt(state.balance)} <span style="font-size:18px">A€</span></div>
     <div class="sub">UID ${esc(state.uid)} · ${typeCn(state.atype)}${state.email?(' · '+esc(state.email)):''}</div></div>
@@ -518,17 +525,22 @@ async function doTransfer(){
 function renderInbox(){
   return `<div class="panel"><h2>待收箱</h2><div id="inboxList"><p class="muted">正在加载待确认交易…</p></div></div>`;
 }
+/// 只渲染列表（数据源为全局 pendingList）：供乐观删除与本地刷新复用。
+function renderInboxList(){
+  const el=$('inboxList'); if(!el) return;
+  if(!pendingList.length){ el.innerHTML='<p class="muted">当前没有待确认交易。</p>'; return; }
+  el.innerHTML=`<table><thead><tr><th>发送方</th><th>类型</th><th>金额</th><th>时间</th><th style="width:140px">操作</th></tr></thead><tbody>`+
+    pendingList.map((it,i)=>`<tr><td class="mono">${esc(it.sender)}</td><td>${esc(it.tx_type)}</td><td class="mono">${fmt(it.amount)} A€</td><td>${fmtTs(it.timestamp)}</td>
+      <td><button class="btn ok sm" data-act="inbox-accept" data-i="${i}">接受</button> <button class="btn danger sm" data-act="inbox-reject" data-i="${i}">拒收</button></td></tr>`).join('')+`</tbody></table>`;
+  el.querySelectorAll('button[data-act]').forEach(b=>{ b.onclick=()=>pendingAction(+b.dataset.i, b.dataset.act==='inbox-reject'?'reject':'accept'); });
+}
 async function loadInbox(){
   const el=$('inboxList'); if(!el) return;
   let items=[]; try{ const r=await api('/api/pending'); items=r.items||[]; }catch(e){ el.innerHTML='<p class="muted">加载失败：'+(e||'')+'</p>'; return; }
   // 必须写回全局：pendingAction() 按序号从 pendingList 取待确认交易
   // （此前只用于局部渲染，导致点「接受/拒收」时 pendingList[i] 为 undefined，静默无反应）
   pendingList = items;
-  if(!items.length){ el.innerHTML='<p class="muted">当前没有待确认交易。</p>'; return; }
-  el.innerHTML=`<table><thead><tr><th>发送方</th><th>类型</th><th>金额</th><th>时间</th><th style="width:140px">操作</th></tr></thead><tbody>`+
-    items.map((it,i)=>`<tr><td class="mono">${esc(it.sender)}</td><td>${esc(it.tx_type)}</td><td class="mono">${fmt(it.amount)} A€</td><td>${fmtTs(it.timestamp)}</td>
-      <td><button class="btn ok sm" data-act="inbox-accept" data-i="${i}">接受</button> <button class="btn danger sm" data-act="inbox-reject" data-i="${i}">拒收</button></td></tr>`).join('')+`</tbody></table>`;
-  el.querySelectorAll('button[data-act]').forEach(b=>{ b.onclick=()=>pendingAction(+b.dataset.i, b.dataset.act==='inbox-reject'?'reject':'accept'); });
+  renderInboxList();
 }
 function renderFlow(){
   const txs=(state.txs||[]).map(t=>({ts:t[5],amount:Math.abs(t[4]),dir:t[7]})).sort((a,b)=>a.ts-b.ts);
@@ -667,13 +679,13 @@ function openModal(kind,data){
   if(kind==='transfer'){ title.textContent='转账'; body.innerHTML=`<div class="field"><label>接收方 UID（可带 @类型）</label><input id="f-to" placeholder="如 Steve 或 AlphaEU@System"></div>
     <div class="field"><label>金额（A€）</label><input id="f-amt" type="number" min="1" placeholder="0"></div><div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
     $('modal-wrap').classList.remove('hidden');
-    ok.onclick=async()=>{ const r=await api('/api/transfer',{to:$('f-to').value,amount:parseInt($('f-amt').value||'0'),password:$('f-pass').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent=r.message; }; cancel.onclick=closeModal; return; }
+    ok.onclick=async()=>{ try{ const r=await api('/api/transfer',{to:$('f-to').value,amount:parseInt($('f-amt').value||'0'),password:$('f-pass').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent=r.message; }catch(e){ err.textContent=(e&&e.message)?e.message:(e||'转账失败'); } }; cancel.onclick=closeModal; return; }
   if(kind==='close'){ title.textContent='注销账户（不可撤销）'; body.innerHTML=`<div class="field" style="color:var(--err);font-weight:bold;">⚠ 注销账户（不可撤销）</div>
-    <p class="muted" style="margin-bottom:12px;">注销后中心账户状态改为「已注销」，账本只读保留供审计，不可再登录；本机记录与密钥将被删除。</p>
+    <p class="muted" style="margin-bottom:12px;">注销后：中心删除你的加密私钥（仅保留公钥）、状态改为「已注销」，不可再登录与交易（账本只读保留供审计）；本机记录与私钥一并删除，并立即退出到登录界面。</p>
     <div class="field"><label>输入钱包口令以确认注销</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
     $('modal-wrap').classList.remove('hidden');
-    ok.onclick=async()=>{ const r=await api('/api/delete-account',{password:$('f-pass').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); view='balance'; } else err.textContent=r.message; }; cancel.onclick=closeModal; return; }
-  if(kind==='setserver'){ title.textContent='设置中心地址'; body.innerHTML=`<div class="field"><label>中心地址</label><input id="f-url" placeholder="https://acsystem.maxshin.top" value="${esc(data.url||'')}"></div>`; $('modal-wrap').classList.remove('hidden'); ok.onclick=async()=>{ const r=await api('/api/set-server',{url:$('f-url').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent=r.message; }; cancel.onclick=closeModal; return; }
+    ok.onclick=async()=>{ try{ const r=await api('/api/delete-account',{password:$('f-pass').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); authPick=null; authMode='list'; view='balance'; renderAuth(); } else err.textContent=r.message; }catch(e){ err.textContent=(e&&e.message)?e.message:(e||'注销失败'); } }; cancel.onclick=closeModal; return; }
+  if(kind==='setserver'){ title.textContent='设置中心地址'; body.innerHTML=`<div class="field"><label>中心地址</label><input id="f-url" placeholder="https://acsystem.maxshin.top" value="${esc(data.url||'')}"></div>`; $('modal-wrap').classList.remove('hidden'); ok.onclick=async()=>{ try{ const r=await api('/api/set-server',{url:$('f-url').value}); if(r.ok){ closeModal(); toast(r.message); await refresh(); } else err.textContent=r.message; }catch(e){ err.textContent=(e&&e.message)?e.message:(e||'保存失败'); } }; cancel.onclick=closeModal; return; }
 }
 function closeModal(){ $('modal-wrap').classList.add('hidden'); }
 function pendingAction(i, act){
@@ -686,7 +698,16 @@ function pendingAction(i, act){
     ${isReject?`<div class="field"><label>拒收原因（可选）</label><input id="f-reason" placeholder="说明拒收原因"></div>`:''}<div class="field"><label>钱包口令</label><input id="f-pass" type="password" placeholder="≥8 位"></div>`;
   ok.textContent=isReject?'确认拒收':'确认接收'; ok.classList.remove('hidden');
   ok.onclick=async()=>{ const pass=$('f-pass').value; if(pass.length<8){ err.textContent='口令至少 8 位'; return; } const payload={txId:it.tx_id,password:pass}; if(isReject) payload.reason=($('f-reason').value||'').trim();
-    const r=await api(isReject?'/api/reject':'/api/confirm',payload); if(r.ok){ closeModal(); toast(r.message); await refresh(); loadInbox(); } else err.textContent=r.message; };
+    const r=await api(isReject?'/api/reject':'/api/confirm',payload);
+    if(r.ok){
+      closeModal(); toast(r.message);
+      // 已处理的那笔立即从列表移除（乐观更新），再以中心数据校正：
+      // 这样即使刷新/同步链路出问题，已接受或已拒收的项也不会残留在待收箱里。
+      pendingList = pendingList.filter(x => x.tx_id !== it.tx_id);
+      renderInboxList();
+      try { await refresh(); } catch(e) {}
+      loadInbox();
+    } else err.textContent=r.message; };
   cancel.onclick=closeModal;
 }
 
@@ -695,7 +716,8 @@ $('btn-sync').onclick=()=>doSync(true);
 async function quitApp(){ try{ await invoke('quit'); }catch(e){} document.body.innerHTML='<div style="padding:40px;text-align:center;color:#68707d">已退出。</div>'; }
 let autoTimer=null, checkedUpdOnce=false;
 async function doSync(showToast){
-  try{ const r=await api('/api/sync',null); if(showToast) toast(r.message||'刷新完成', !r.ok); }catch(e){ if(showToast) toast('刷新失败：'+(e||''), true); }
+  // 同步成功不再弹提示（顶栏余额/流水刷新即反馈）；仅失败时提示，避免刷屏干扰
+  try{ const r=await api('/api/sync',null); if(showToast && !r.ok) toast(r.message||'刷新失败', true); }catch(e){ if(showToast) toast('刷新失败：'+(e||''), true); }
   await refresh();
 }
 function ensureAutoSync(){

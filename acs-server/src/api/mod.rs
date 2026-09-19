@@ -99,6 +99,8 @@ impl From<acs_core::errors::AcsError> for ApiErr {
             E::AccountExists(m) => Self::bad_request(format!("账户已存在: {m}")),
             E::InsufficientBalance => Self::bad_request("余额不足"),
             E::AccountNotActive => Self::bad_request("账户未激活（冻结或关闭）"),
+            // 注销 / 冻结 / 关闭账户的交易拦截：403 + 可读原因
+            E::AccountBlocked(m) => Self::forbidden(m),
             E::HashMismatch(m) => Self::bad_request(format!("哈希链不一致: {m}")),
             E::Unauthorized(m) => Self::forbidden(m),
             E::InvalidCode => Self::bad_request("验证码无效"),

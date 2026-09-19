@@ -130,9 +130,43 @@ pub fn set_last_hash(
     Ok(())
 }
 
+/// 注销后的云端清理：**删除口令加密的私钥密文，只保留公钥**。
+/// 账本与公钥保留（审计需要），但中心不再持有可解开的私钥材料。
+/// 系统账户不在此列：其密钥材料属服务端自有资产（代管签名用）。
+pub fn purge_secret(conn: &Connection, uid: &str, atype: AccountType) -> Result<()> {
+    if atype == AccountType::System {
+        return Ok(());
+    }
+    let table = atype.table_name();
+    conn.execute(
+        &format!("UPDATE {table} SET encrypted_seckey='', changed_at=?1 WHERE uid=?2"),
+        params![Utc::now().timestamp(), uid],
+    )?;
+    Ok(())
+}
+
+/// 交易前置校验：只有 `Active` 账户可以参与交易。
+///
+/// `who` 为可读主语（"发送方" / "接收方"），用于给出「谁」不可交易的提示。
+/// 注销 / 冻结 / 关闭一律拒绝，并带上具体原因（对外映射为 403）。
+pub fn ensure_tradable(status: AccountStatus, who: &str) -> Result<()> {
+    match status {
+        AccountStatus::Active => Ok(()),
+        AccountStatus::Deleted => Err(AcsError::AccountBlocked(format!(
+            "{who}账户已注销，不可进行交易"
+        ))),
+        AccountStatus::Frozen => Err(AcsError::AccountBlocked(format!(
+            "{who}账户已被冻结，不可进行交易"
+        ))),
+        AccountStatus::Closed => Err(AcsError::AccountBlocked(format!(
+            "{who}账户已关闭，不可进行交易"
+        ))),
+    }
+}
+
 /// 全量重算并回写所有账户余额：balance = Σ(计入的收款) − Σ(计入的支出)。
 ///
-/// **计入口径（v3.1.0 起）**：`Pending` 与 `Confirmed` 均计入，`Rejected` / `Error` 不计入。
+/// **计入口径（v3.2.0 起）**：`Pending` 与 `Confirmed` 均计入，`Rejected` / `Error` 不计入。
 /// 即：转出一提交（Pending）就立即扣减发送方余额（防止同一笔钱被重复花出），
 /// 收款方在待确认阶段即计入余额（若对方拒收，则该笔交易状态转为 Rejected，双方余额自动回退）。
 ///

@@ -10,9 +10,7 @@ use rusqlite::{params, Connection, Row, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use crate::errors::{AcsError, Result};
-use crate::models::{
-    AccountStatus, AccountType, Transaction, TransactionStatus, TransactionType,
-};
+use crate::models::{AccountType, Transaction, TransactionStatus, TransactionType};
 
 const TX_COLS: &str = "tx_id, tx_type, sender, sender_type, receiver, receiver_type, amount, ts, received_at, tx_hash, sender_sig, central_sig, receiver_sig, sender_last_hash, receiver_last_hash, status, confirmed_at, reject_reason";
 
@@ -45,6 +43,23 @@ pub fn account_chain_seed(uid: &str, atype: AccountType) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{}|{}|genesis", uid, atype.as_str()).as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// 链头等值判定：**把 NULL / 空串与「创世种子」视为同一状态**。
+///
+/// 为什么需要：不同创建路径写入的初值不一致 —— 客户端注册路径写的是 `Some(创世种子)`，
+/// 而系统账户种子创建、旧库遗留行写的是 `NULL`；而构建交易时双方都会把空值具化为创世
+/// 种子。若直接比较，`NULL` 与种子会被判为「链头不一致」，后果是：
+/// **确认/提交永远失败、交易状态停在 Pending**；又因 v3.2.0 起 Pending 已计入余额，
+/// 表现为「余额是对的，但交易状态没改」。
+fn head_eq(stored: Option<&str>, expected: Option<&str>, owner: &str, atype: AccountType) -> bool {
+    fn norm(v: Option<&str>, owner: &str, atype: AccountType) -> String {
+        match v.map(str::trim) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => account_chain_seed(owner, atype),
+        }
+    }
+    norm(stored, owner, atype) == norm(expected, owner, atype)
 }
 
 fn map_tx(row: &Row) -> rusqlite::Result<Transaction> {
@@ -179,9 +194,11 @@ pub fn submit_tx(conn: &mut Connection, tx: &Transaction) -> Result<()> {
     // 非 Mint：提交为 Pending，校验发送方状态与余额
     let db = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let sender = crate::account::require_account(&db, &tx.sender, tx.sender_type)?;
-    if sender.status != AccountStatus::Active {
-        return Err(AcsError::AccountNotActive);
-    }
+    // 注销 / 冻结 / 关闭的账户不得发起任何交易（给出具体原因，对外 403）
+    crate::account::ensure_tradable(sender.status, "发送方")?;
+    // 接收方同理：不允许把钱打进已注销 / 冻结账户
+    let receiver = crate::account::require_account(&db, &tx.receiver, tx.receiver_type)?;
+    crate::account::ensure_tradable(receiver.status, "接收方")?;
     if tx.tx_type == TransactionType::Transfer || tx.tx_type == TransactionType::Redeem {
         // 余额口径含 Pending，故这里已扣除「其他待确认转账」，重复花费会被拦下。
         // 用 raw_balance：它不把透支夹取为 0。
@@ -189,11 +206,16 @@ pub fn submit_tx(conn: &mut Connection, tx: &Transaction) -> Result<()> {
             return Err(AcsError::InsufficientBalance);
         }
     }
-    if sender.last_tx_hash.as_deref() != tx.sender_last_hash.as_deref() {
+    if !head_eq(
+        sender.last_tx_hash.as_deref(),
+        tx.sender_last_hash.as_deref(),
+        &tx.sender,
+        tx.sender_type,
+    ) {
         return Err(AcsError::HashMismatch("发送方链头不一致".into()));
     }
     insert_transaction(&db, tx)?;
-    // Pending 即计入余额（v3.1.0）：
+    // Pending 即计入余额（v3.2.0）：
     // - 推进发送方链头（否则同一发送方的连续待确认转账会重复用同一链头）
     // - 重算双方余额（发送方立即扣减、接收方立即入账；被拒收时再回退）
     crate::account::set_last_hash(&db, &tx.sender, tx.sender_type, Some(tx.tx_hash.as_str()))?;
@@ -229,10 +251,14 @@ pub fn confirm_tx(
     // 确认不再做增量结算：Pending 阶段已计入双方余额、并已推进发送方链头。
     // 这里只做与结算同等的校验，然后置为 Confirmed 并推进接收方链头。
     let receiver = crate::account::require_account(&db, &tx.receiver, tx.receiver_type)?;
-    if receiver.status != AccountStatus::Active {
-        return Err(AcsError::AccountNotActive);
-    }
-    if receiver.last_tx_hash.as_deref() != tx.receiver_last_hash.as_deref() {
+    // 已注销 / 冻结的账户不得接受交易请求（明确原因，对外 403）
+    crate::account::ensure_tradable(receiver.status, "接收方")?;
+    if !head_eq(
+        receiver.last_tx_hash.as_deref(),
+        tx.receiver_last_hash.as_deref(),
+        &tx.receiver,
+        tx.receiver_type,
+    ) {
         return Err(AcsError::HashMismatch("接收方链头不一致".into()));
     }
     if matches!(tx.tx_type, TransactionType::Transfer | TransactionType::Redeem) {
@@ -321,10 +347,13 @@ pub fn is_terminal(status: TransactionStatus) -> bool {
 /// 注意：Mint 的发送方为根管理员（非账本账户），不校验发送方。
 fn apply_settlement(conn: &Connection, tx: &Transaction) -> Result<()> {
     let receiver = crate::account::require_account(conn, &tx.receiver, tx.receiver_type)?;
-    if receiver.status != AccountStatus::Active {
-        return Err(AcsError::AccountNotActive);
-    }
-    if receiver.last_tx_hash.as_deref() != tx.receiver_last_hash.as_deref() {
+    crate::account::ensure_tradable(receiver.status, "接收方")?;
+    if !head_eq(
+        receiver.last_tx_hash.as_deref(),
+        tx.receiver_last_hash.as_deref(),
+        &tx.receiver,
+        tx.receiver_type,
+    ) {
         return Err(AcsError::HashMismatch("接收方链头不一致".into()));
     }
     let hash = Some(tx.tx_hash.as_str());

@@ -58,7 +58,7 @@ fn transfer_needs_confirmation() -> Result<()> {
     let t = tx_chained(TransactionType::Transfer, "Alice", AccountType::Individual, "Bob", AccountType::Individual, 300,
                        Some(&fund.tx_hash), None);
     transaction::submit_tx(&mut conn, &t)?;
-    // Pending 即计入余额（v3.1.0）：提交即扣发送方、入接收方
+    // Pending 即计入余额（v3.2.0）：提交即扣发送方、入接收方
     assert_eq!(bal(&conn, "Alice", AccountType::Individual), 700);
     assert_eq!(bal(&conn, "Bob", AccountType::Individual), 300);
     // 接收方确认（带确认签名）：金额归属不变，仅状态推进
@@ -355,7 +355,7 @@ fn issue_and_redeem_are_one_sided() -> Result<()> {
     Ok(())
 }
 
-/// 余额口径（v3.1.0 起）：`Pending` 与 `Confirmed` **计入**，`Rejected` / `Error` **不计入**。
+/// 余额口径（v3.2.0 起）：`Pending` 与 `Confirmed` **计入**，`Rejected` / `Error` **不计入**。
 /// 并锁定「余额只能来自账本」这一不变量（任何绕过账本直接写 balance 的做法，
 /// 都会在下一次全量重算时被抹掉）。
 #[test]

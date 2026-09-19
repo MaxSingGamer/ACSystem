@@ -195,7 +195,7 @@ pub fn migrate_center(conn: &Connection) -> Result<()> {
     }
     // 系统账户：口令密文列（密钥材料只入库，不再导出 .asc/.key 文件）
     ensure_col(conn, "accounts_system", "key_passphrase_enc", "TEXT NOT NULL DEFAULT ''")?;
-    // v3.1.0：系统账户账本访问口令（封存）+ 首次登录强制改密标记
+    // v3.2.0：系统账户账本访问口令（封存）+ 首次登录强制改密标记
     // 注：不使用 password_hash 列 —— 本版的原则是不保存任何口令哈希，
     //     这里与 key_passphrase_enc 一样只存 AES-GCM 密文（密钥为 master.key）。
     ensure_col(conn, "accounts_system", "ledger_pw_enc", "TEXT NOT NULL DEFAULT ''")?;
@@ -234,8 +234,20 @@ pub fn migrate_center(conn: &Connection) -> Result<()> {
     // 移除历史遗留的 password_hash 列（不再保存任何口令哈希）
     for t in ["accounts_country", "accounts_company", "accounts_individual", "accounts_system"] {
         if column_exists(conn, t, "password_hash") {
-            let _ = conn.execute(&format!("ALTER TABLE {t} DROP COLUMN password_hash"), []);
+            let _ = conn.execute(&format!("ALTER TABLE {t} DROP COLUMN password_hash"), []); 
         }
+    }
+    // v3.2.0 数据迁移：**已注销账户的云端加密私钥一律清除**（只保留公钥）。
+    // 保证「注销后云端不再持有可取回私钥的材料」这一不变量对历史数据同样成立；
+    // 纯数据 UPDATE，无结构变更。系统账户豁免（其密钥材料属服务端自有资产，代管签名用）。
+    for t in ["accounts_country", "accounts_company", "accounts_individual"] {
+        let _ = conn.execute(
+            &format!(
+                "UPDATE {t} SET encrypted_seckey='' \
+                 WHERE status='Deleted' AND encrypted_seckey<>''"
+            ),
+            [],
+        );
     }
     // 交易表补列：服务端收到时间 / 接收方确认签名 / 确认时间 / 拒收理由
     ensure_col(conn, "transactions", "received_at", "INTEGER NOT NULL DEFAULT 0")?;

@@ -18,6 +18,10 @@ pub enum AcsError {
     AccountExists(String),
     #[error("账户未激活（冻结或关闭）")]
     AccountNotActive,
+    /// 账户处于注销 / 冻结 / 关闭状态：不可进行任何交易。
+    /// 文案由调用方给出（带主语与具体状态），对外映射为 403。
+    #[error("{0}")]
+    AccountBlocked(String),
     #[error("余额不足")]
     InsufficientBalance,
     #[error("签名无效")]

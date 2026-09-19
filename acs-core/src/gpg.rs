@@ -97,6 +97,15 @@ impl GpgUtil {
 
     // ---- 密钥 ----
 
+    /// 删除本机 gpg 密钥对（注销账户时清理本地私钥）。
+    /// 先删私钥再删公钥；密钥本已不存在时视为成功（幂等）。
+    /// `passphrase` 可选：仅在某些 gpg 版本要求解锁才能删除时用得上。
+    pub fn delete_key(&self, fingerprint: &str, passphrase: Option<&str>) -> Result<()> {
+        let _ = self.run(&["--delete-secret-keys", fingerprint], passphrase, None);
+        let _ = self.run(&["--delete-keys", fingerprint], passphrase, None);
+        Ok(())
+    }
+
     /// 生成 ed25519 密钥对（cert+sign），user_id 形如 `"ID-Type <email>"`。
     /// 返回指纹、armored 公钥、密码上锁的 armored 私钥。
     ///

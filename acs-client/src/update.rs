@@ -39,7 +39,7 @@ pub fn platform() -> String {
     }
 }
 
-/// 从安装包文件名解析版本：acs-client-3.1.0-windows-x64-setup.exe -> 3.1.0
+/// 从安装包文件名解析版本：acs-client-3.2.0-windows-x64-setup.exe -> 3.2.0
 fn version_from_filename(name: &str) -> Option<String> {
     let name = name.strip_prefix("acs-client-")?;
     let end = name.find('-')?;

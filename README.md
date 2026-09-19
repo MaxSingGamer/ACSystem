@@ -1,7 +1,7 @@
 # 💰 A€ — Alpha Coin 中心化数字货币结算系统
 
 > **ACSystem**：为 Minecraft 服务器组织 **AEU（Alpha Economy Union）** 提供可审计、可签名的 A€ 结算基础设施。
-> Rust workspace（核心库 / 中心服务器 / 桌面钱包 · Tauri 2）。当前版本 **v3.1.0**。
+> Rust workspace（核心库 / 中心服务器 / 桌面钱包 · Tauri 2）。当前版本 **v3.2.0**。
 
 ---
 

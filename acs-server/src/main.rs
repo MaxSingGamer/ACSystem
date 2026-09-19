@@ -413,7 +413,11 @@ fn seed_systems_from_env(
                 encrypted_seckey: gk.encrypted_seckey,
                 balance: 0,
                 status: AccountStatus::Active,
-                last_tx_hash: None,
+                // 链头初值必须与客户端侧一致（创世种子），否则首笔交易会被判「链头不一致」
+                last_tx_hash: Some(acs_core::transaction::account_chain_seed(
+                    &s.uid,
+                    AccountType::System,
+                )),
                 created_at: chrono::Utc::now(),
                 changed_at: chrono::Utc::now(),
             },

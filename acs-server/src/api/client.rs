@@ -113,7 +113,12 @@ async fn close_account(
     }
     let conn = st.db.lock().unwrap();
     account::set_status(&conn, &req.uid, atype, AccountStatus::Deleted).map_err(ApiErr::from)?;
-    Ok(Json(json!({ "ok": true, "uid": req.uid, "type": atype.as_str(), "status": "Deleted" })))
+    // 云端只保留公钥：删掉口令加密的私钥密文（中心不再持有可解开的私钥材料）
+    account::purge_secret(&conn, &req.uid, atype).map_err(ApiErr::from)?;
+    Ok(Json(json!({
+        "ok": true, "uid": req.uid, "type": atype.as_str(), "status": "Deleted",
+        "message": "账户已注销：中心已删除加密私钥（仅保留公钥），不可再交易"
+    })))
 }
 
 /// 读取账户公钥（用于验签）。

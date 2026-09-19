@@ -98,6 +98,7 @@ fn state(state: tauri::State<AppState>) -> CmdResult<serde_json::Value> {
         "server_url": w.info.server_url,
         "synced_at": w.info.synced_at,
         "balance": w.mirror_balance(),
+        "status": w.mirror_status(),
         "outbox": outbox,
         "accounts": accounts,
     });
@@ -314,12 +315,18 @@ fn delete_account(state: tauri::State<AppState>, password: String) -> CmdResult<
         let mut w = state.wallet.lock().map_err(err).unwrap();
         let uid = w.info.uid.clone();
         let atype = w.info.atype;
+        // 先拿指纹（删密钥后就不一定能查到了）
+        let fp = w.fingerprint(&uid);
         crate::client_api::close_account(&w, &password).map_err(err)?;
+        // 本机清理：先删 gpg 密钥（私钥本体），再删本地账户记录（含加密私钥缓存），最后登出
+        if let Some(fp) = fp {
+            let _ = w.gpg.delete_key(&fp, Some(&password));
+        }
         let _ = w.delete_local_account(&uid, atype);
         let _ = w.clear_current();
         Ok(serde_json::json!({
             "ok": true,
-            "message": format!("账户 {uid} 已注销：中心状态已改 Deleted（账本只读保留供审计），本机记录已删除"),
+            "message": format!("账户 {uid} 已注销：中心已删除加密私钥（仅保留公钥）、状态 Deleted 不可再交易；本机记录与私钥已清除"),
         }))
     })
 }

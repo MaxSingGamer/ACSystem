@@ -319,6 +319,18 @@ impl Wallet {
             .unwrap_or(0)
     }
 
+    /// 本账户在最近一次镜像快照中的状态（中心口径：Active / Frozen / Closed / Deleted）。
+    /// 用于界面提前提示「不可交易」，避免只能等被服务端拒绝才知道。
+    pub fn mirror_status(&self) -> String {
+        self.conn
+            .query_row(
+                "SELECT status FROM mirror_accounts WHERE uid=?1 AND type=?2",
+                params![self.info.uid, self.info.atype.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| "Active".to_string())
+    }
+
     // ---- 多账户 ----
 
     /// 列出本地历史登录账户（最近登录优先）。

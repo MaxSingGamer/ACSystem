@@ -18,16 +18,19 @@ function toggleTheme(){
 }
 applyTheme();
 
+/// 统一 HTTP 错误文案：`HTTP <状态码> : <原因>`（与客户端一致，方便对照排查）
+const httpMsg = (code, reason) => 'HTTP ' + code + ' : ' + ((reason && String(reason).trim()) || '请求被拒绝');
+
 async function api(path, opt = {}) {
   const h = Object.assign({ 'Content-Type': 'application/json' }, opt.headers || {});
   if (TOKEN) h['Authorization'] = 'Bearer ' + TOKEN;
   const r = await fetch(path, Object.assign({}, opt, { headers: h }));
   if (opt.raw) {
-    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(httpMsg(r.status, j.error)); }
     return r.text();
   }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  if (!r.ok) throw new Error(httpMsg(r.status, j.error));
   return j;
 }
 
