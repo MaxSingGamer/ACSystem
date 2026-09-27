@@ -437,6 +437,8 @@ async fn submit(
 
     // 5) 提交（Pending）；提交前只重算「发送方」余额，保证余额判断准确
     //    （全量重算代价高且会长时间持有全局库锁，交由 /api/sync 低频触发）
+    //    注：接收方此刻既不入账也不推进链头 —— 待收（Pending 收款）不算接收方余额，
+    //    要等接收方点「接受」（/api/client/confirm）才到账（v3.2.1 口径）
     let mut conn = st.db.lock().unwrap();
     acs_core::account::recompute_account(&conn, &tx.sender, tx.sender_type)?;
     transaction::submit_tx(&mut conn, &tx)?;

@@ -278,6 +278,11 @@ impl Wallet {
         Ok(())
     }
 
+    /// 从本地库重新读取钱包元信息（同步推进水位后刷新内存态，避免界面显示旧值）。
+    pub fn reload_info(&mut self) {
+        self.info = load_info(&self.conn);
+    }
+
     pub fn set_server_url(&mut self, url: &str) -> Result<()> {
         meta_set(&self.conn, "server_url", url)?;
         self.info.server_url = url.to_string();
@@ -290,15 +295,26 @@ impl Wallet {
         Ok(())
     }
 
+    /// 记录同步水位。
+    ///
+    /// **水位必须取中心的 `server_time`**（`pull()` 返回的 `r.server_time`），
+    /// 不能用本机时钟：增量同步是 `GET /api/sync?since=<水位>`，服务端按
+    /// `transactions.ts > since` 过滤。若水位写成「本机 now」，而客户端时钟比服务端快
+    /// （哪怕几秒），服务端刚写入的 Confirmed 交易（ts 夹在两者之间）就会被永久跳过，
+    /// 表现为「已确认的交易在客户端一直不出现、镜像里的链头停在旧值，之后再转账就报链头不一致」。
     pub fn mark_synced(&mut self, server_time: i64, last_tx_hash: Option<&str>) -> Result<()> {
-        let now = chrono::Utc::now().timestamp();
-        meta_set(&self.conn, "synced_at", &now.to_string())?;
-        self.info.synced_at = now;
+        // server_time 缺失（=0）时退回本机时间，避免把水位写成 0 导致每次全量拉取
+        let watermark = if server_time > 0 {
+            server_time
+        } else {
+            chrono::Utc::now().timestamp()
+        };
+        meta_set(&self.conn, "synced_at", &watermark.to_string())?;
+        self.info.synced_at = watermark;
         if let Some(h) = last_tx_hash {
             meta_set(&self.conn, "last_tx_hash", h)?;
             self.info.last_tx_hash = h.to_string();
         }
-        let _ = server_time;
         Ok(())
     }
 

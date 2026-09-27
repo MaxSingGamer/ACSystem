@@ -185,7 +185,15 @@ fn sync_now(state: tauri::State<AppState>) -> CmdResult<serde_json::Value> {
             return Err("未登录，无法同步".to_string());
         }
         let r = crate::sync::pull(&w).map_err(err)?;
-        let _ = w.mark_synced(r.server_time, None);
+        if r.accounts == 0 {
+            // 账户快照为空说明没拿到中心数据（异常响应），不要推进同步水位，
+            // 否则下一次增量同步会跳过这段时间的交易。
+            return Err("中心未返回账户快照，本次同步未生效".to_string());
+        }
+        // 水位取**中心时间**（r.server_time）：增量同步按服务端 ts 过滤，用本机时钟会漏交易
+        w.mark_synced(r.server_time, None).map_err(err)?;
+        // 快照已刷新（含本账户最新链头），转账等操作才能拿到正确链头
+        w.reload_info();
         Ok(serde_json::json!({
             "ok": true,
             "message": format!("已同步：新增交易 {}，账户快照 {}", r.txs, r.accounts),

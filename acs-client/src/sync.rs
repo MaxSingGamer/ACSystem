@@ -36,7 +36,8 @@ pub struct SyncResult {
 }
 
 /// 同步：直接从中心服务器拉取增量（v3.0.0 取消镜像，不再发现多个端点）。
-/// since 取本地已知的最大交易时间戳。client 免 apikey。
+/// `since` 取**上次同步到的中心时间**（`synced_at` 写的是服务端 `server_time`，
+/// 不能用本机时钟，否则会漏掉刚确认的交易、镜像链头也会滞留）。client 免 apikey。
 pub fn pull(w: &Wallet) -> Result<SyncResult> {
     let server = w.info.server_url.trim().trim_end_matches('/');
     if server.is_empty() {
@@ -44,7 +45,7 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
     }
 
     // 1) 中心直接拉增量（GET /api/sync?since=X）
-    // since 取“上次同步到的中心时间”——客户端不再保存账本副本，故不再从本地账本取 MAX(ts)
+    // since 取“上次同步到的中心时间”（服务端 server_time），客户端不再保存账本副本
     let since: i64 = w.info.synced_at;
     acs_core::log::net(&format!("GET {server}/api/sync?since={since}"));
     let resp = shared_agent().get(&format!("{server}/api/sync?since={since}"))

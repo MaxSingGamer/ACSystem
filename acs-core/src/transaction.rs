@@ -2,6 +2,14 @@
 //!
 //! - `Mint`（铸造）：根管理员发起，只打入 PreIssuedAccount，**自动确认**（需中心签名）。
 //! - `Transfer / Issue / Redeem`：提交后为 Pending，**接收方确认**后才结算。
+//!
+//! 余额与链头语义（v3.2.1，两侧刻意不对称）：
+//! - **提交（Pending）**：立即冻结并扣减**发送方**余额、推进发送方链头；
+//!   接收方**不入账、不推进链头** —— 待收箱里的一笔在接收方点「接受」前不属于接收方。
+//! - **确认（Confirmed）**：接收方此刻才入账（余额重算），并推进接收方链头；
+//!   确认**不再校验**接收方链头（待收不占链头，接收方在待收期间的任何操作都不该让这笔卡住）。
+//! - **拒收 / 置错**：发送方链头回退、金额退回；接收方从未入账，只做幂等重算。
+//!
 //! 确认信息（`receiver_sig` / `confirmed_at` / `reject_reason`）直接内联在 `transactions` 表中，
 //! 不再另建 `tx_confirmations` 附属表（该表的 confirmed 列与 status 冗余，且从未被任何查询读取）。
 //! 所有结算在单个 `BEGIN IMMEDIATE` 事务内完成，重查余额与链头，防双花。
@@ -50,8 +58,9 @@ pub fn account_chain_seed(uid: &str, atype: AccountType) -> String {
 /// 为什么需要：不同创建路径写入的初值不一致 —— 客户端注册路径写的是 `Some(创世种子)`，
 /// 而系统账户种子创建、旧库遗留行写的是 `NULL`；而构建交易时双方都会把空值具化为创世
 /// 种子。若直接比较，`NULL` 与种子会被判为「链头不一致」，后果是：
-/// **确认/提交永远失败、交易状态停在 Pending**；又因 v3.2.0 起 Pending 已计入余额，
-/// 表现为「余额是对的，但交易状态没改」。
+/// **提交/确认永远失败、交易状态停在 Pending**。
+/// 用途：**仅用于发送方**（提交时校验发送方链头，防重放/双花）；
+/// 接收方确认不再做此校验，见 [`crate::account::advance_head_for_receiver`]。
 fn head_eq(stored: Option<&str>, expected: Option<&str>, owner: &str, atype: AccountType) -> bool {
     fn norm(v: Option<&str>, owner: &str, atype: AccountType) -> String {
         match v.map(str::trim) {
@@ -215,14 +224,14 @@ pub fn submit_tx(conn: &mut Connection, tx: &Transaction) -> Result<()> {
         return Err(AcsError::HashMismatch("发送方链头不一致".into()));
     }
     insert_transaction(&db, tx)?;
-    // Pending 即计入余额（v3.2.0）：
+    // Pending 只冻结**发送方**（v3.2.1）：
     // - 推进发送方链头（否则同一发送方的连续待确认转账会重复用同一链头）
-    // - 重算双方余额（发送方立即扣减、接收方立即入账；被拒收时再回退）
+    // - 只重算发送方余额（立即扣减；被拒收/置错时再由 rollback_pending 退回）
+    // - **接收方此时既不入账、也不推进链头**：待收箱里的一笔在接收方点「接受」前
+    //   不属于接收方；若此刻占用接收方链头，接收方在待收期间的转账会把链头顶走，
+    //   点「接受」就会因「链头不一致」永久失败（历史 bug）。
     crate::account::set_last_hash(&db, &tx.sender, tx.sender_type, Some(tx.tx_hash.as_str()))?;
     crate::account::recompute_account(&db, &tx.sender, tx.sender_type)?;
-    if crate::account::account_exists(&db, &tx.receiver, tx.receiver_type)? {
-        crate::account::recompute_account(&db, &tx.receiver, tx.receiver_type)?;
-    }
     db.commit()?;
     Ok(())
 }
@@ -248,22 +257,22 @@ pub fn confirm_tx(
     if tx.receiver != actor_uid || tx.receiver_type != actor_type {
         return Err(AcsError::Unauthorized("仅接收方可确认该交易".into()));
     }
-    // 确认不再做增量结算：Pending 阶段已计入双方余额、并已推进发送方链头。
-    // 这里只做与结算同等的校验，然后置为 Confirmed 并推进接收方链头。
+    // 确认不再做增量结算：Pending 阶段已冻结发送方余额、并已推进发送方链头。
+    // 这里做与结算同等的校验，然后置为 Confirmed：**接收方此刻才入账**（余额重算会把
+    // 本笔 Confirmed 收款计入），并按 advance_head_for_receiver 推进接收方链头。
     let receiver = crate::account::require_account(&db, &tx.receiver, tx.receiver_type)?;
     // 已注销 / 冻结的账户不得接受交易请求（明确原因，对外 403）
     crate::account::ensure_tradable(receiver.status, "接收方")?;
-    if !head_eq(
-        receiver.last_tx_hash.as_deref(),
-        tx.receiver_last_hash.as_deref(),
-        &tx.receiver,
-        tx.receiver_type,
-    ) {
-        return Err(AcsError::HashMismatch("接收方链头不一致".into()));
-    }
+    // 注：**不做**「接收方链头 == tx.receiver_last_hash」的校验。待收（Pending 收款）
+    // 不占接收方链头，接收方在待收期间自己转账、或先接受了另一笔收款，都会让链头前移；
+    // 若在此判「链头不一致」，交易会永久卡在 Pending、待收箱也点不掉（历史 bug）。
+    // 推进改为「能对上才推进」：绝不回退、更不覆盖别人的链头。
     if matches!(tx.tx_type, TransactionType::Transfer | TransactionType::Redeem) {
-        // 复核发送方可支付性（口径含本笔扣减，透支即拒绝；raw_balance 不夹取负值）
-        if crate::account::raw_balance(&db, &tx.sender, tx.sender_type)? < 0 {
+        // 复核发送方可支付性：本笔金额在提交时已冻结（含在 raw_balance 的支出里），
+        // 故应判断「这笔钱站在账本上是否真的有」= raw_balance + 本笔金额 >= 0。
+        // 若写成 raw_balance < 0，则发送方把余额花超后，**接收方点接受会连带失败**
+        // （钱早已冻结、却因发送方账面为负而收不到），属于把第三方问题转嫁给接收方。
+        if crate::account::raw_balance(&db, &tx.sender, tx.sender_type)? + tx.amount < 0 {
             return Err(AcsError::InsufficientBalance);
         }
     }
@@ -271,7 +280,14 @@ pub fn confirm_tx(
         "UPDATE transactions SET status='Confirmed', receiver_sig=?1, confirmed_at=?2 WHERE tx_id=?3",
         params![receiver_sig, chrono::Utc::now().timestamp(), tx_id],
     )?;
-    crate::account::set_last_hash(&db, &tx.receiver, tx.receiver_type, Some(tx.tx_hash.as_str()))?;
+    if let Some(head) = crate::account::advance_head_for_receiver(
+        receiver.last_tx_hash.as_deref(),
+        tx.receiver_last_hash.as_deref(),
+        Some(tx.tx_hash.as_str()),
+    ) {
+        crate::account::set_last_hash(&db, &tx.receiver, tx.receiver_type, Some(head.as_str()))?;
+    }
+    // 接收方余额重算：本笔已转 Confirmed，此刻起这笔钱才算接收方的
     crate::account::recompute_account(&db, &tx.receiver, tx.receiver_type)?;
     db.commit()?;
     Ok(())
@@ -324,6 +340,10 @@ pub fn mark_error(
 
 /// 把一笔 Pending 交易从账本口径中撒下：回退发送方链头并重算双方余额。
 /// 用于拒收 / 置错（金额不再计入余额）。
+///
+/// v3.2.1：接收方的待收（Pending 收款）本来就**不入账、不占链头**，所以这里对接收方
+/// 只需重算余额（结果必然不变，保持幂等）；也绝不能去回退接收方链头 ——
+/// 它可能已被接收方自己的转账推进，回退会破坏别人的链。
 fn rollback_pending(conn: &Connection, tx: &Transaction) -> Result<()> {
     if crate::account::account_exists(conn, &tx.sender, tx.sender_type)? {
         crate::account::set_last_hash(conn, &tx.sender, tx.sender_type, tx.sender_last_hash.as_deref())?;
@@ -370,7 +390,7 @@ fn apply_settlement(conn: &Connection, tx: &Transaction) -> Result<()> {
                 conn, &tx.receiver, tx.receiver_type, receiver.balance + tx.amount, hash,
             )?;
         }
-        // Transfer / Redeem 不再走这里（提交即为 Pending 并计入余额，确认时只改状态）
+        // Transfer / Redeem 不再走这里（提交即为 Pending，确认时才入账；见 submit_tx/confirm_tx）
         TransactionType::Transfer | TransactionType::Redeem => {
             return Err(AcsError::Message(
                 "内部错误：Transfer/Redeem 不应走 Mint 结算路径".into(),

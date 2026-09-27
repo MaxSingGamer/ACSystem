@@ -224,7 +224,12 @@ fn cmd_sync() -> Result<()> {
     // （`status` 是纯查询，仍允许在未初始化状态下打印状态。）
     let mut w = wallet_ready()?;
     let r = sync::pull(&w)?;
+    if r.accounts == 0 {
+        return Err(anyhow!("中心未返回账户快照，本次同步未生效（同步水位未推进）"));
+    }
+    // 水位取中心时间（服务端按 ts 过滤增量）；用本机时钟会漏掉已确认交易
     w.mark_synced(r.server_time, None)?;
+    w.reload_info();
     println!("同步完成：新增交易 {} · 账户快照 {} · 快照哈希 {}",
         r.txs, r.accounts, &r.hash[..r.hash.len().min(16)]);
     if let Some(s) = &r.central_sig {

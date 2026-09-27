@@ -116,8 +116,11 @@ pub fn update_balance_and_hash(
 }
 
 /// 仅更新账本链头（余额统一交给 `recompute_account` / `recompute_all_balances`）。
-/// 语义（与余额口径配套）：交易一提交（Pending）就推进**发送方**链头，
-/// 接收方链头在确认时推进；被拒收/置错时发送方链头回退到 `sender_last_hash`。
+/// 语义（与余额口径配套，v3.2.1）：
+/// - 交易一提交（Pending）就推进**发送方**链头（发送方事务严格串行，防重放/双花）；
+/// - **接收方链头在确认时才推进**：待收（Pending 收款）不占接收方链头，否则接收方
+///   在待收期间自己的转账会把链头顶走，导致点「接受」时判「链头不一致」而永远卡在 Pending；
+/// - 被拒收/置错时发送方链头回退到 `sender_last_hash`。
 pub fn set_last_hash(
     conn: &Connection,
     uid: &str,
@@ -128,6 +131,29 @@ pub fn set_last_hash(
     let sql = format!("UPDATE {table} SET last_tx_hash=?1, changed_at=?2 WHERE uid=?3");
     conn.execute(&sql, params![last_tx_hash, Utc::now().timestamp(), uid])?;
     Ok(())
+}
+
+/// 接收方确认收款时要写入的链头。
+///
+/// 待收（Pending 收款）**不占**接收方链头，因此确认时的链头推进必须容忍「链头已被
+/// 接收方自己的转账（或另一笔先被接受的收款）顶走」这一正常情形：
+/// - 链头仍等于本笔交易快照的 `receiver_last_hash` → 推进为本笔 `tx_hash`（常规路径）；
+/// - 链头已是本笔 `tx_hash`（拒收回退路径）→ 保持不变（幂等）；
+/// - 链头已被别的交易顶走 → 返回 `None`（**保持现状，绝不回退别人的链头**）。
+///
+/// 历史 bug 现场：这里以前硬性要求「链头 == receiver_last_hash」，于是接收方一旦在
+/// 待收期间自己转过账，点「接受」就永久报「接收方链头不一致」，表现为
+/// 「交易状态持续 Pending + 待收箱点了接受仍不清理」。
+pub fn advance_head_for_receiver(
+    stored: Option<&str>,
+    receiver_last_hash: Option<&str>,
+    new_head: Option<&str>,
+) -> Option<String> {
+    if stored == receiver_last_hash || stored == new_head {
+        new_head.map(|s| s.to_string())
+    } else {
+        None
+    }
 }
 
 /// 注销后的云端清理：**删除口令加密的私钥密文，只保留公钥**。
@@ -166,13 +192,20 @@ pub fn ensure_tradable(status: AccountStatus, who: &str) -> Result<()> {
 
 /// 全量重算并回写所有账户余额：balance = Σ(计入的收款) − Σ(计入的支出)。
 ///
-/// **计入口径（v3.2.0 起）**：`Pending` 与 `Confirmed` 均计入，`Rejected` / `Error` 不计入。
-/// 即：转出一提交（Pending）就立即扣减发送方余额（防止同一笔钱被重复花出），
-/// 收款方在待确认阶段即计入余额（若对方拒收，则该笔交易状态转为 Rejected，双方余额自动回退）。
+/// **计入口径（v3.2.1 起，两侧不对称）**：
+/// - **支出（发送方）**：`Pending` + `Confirmed` 均计入 —— 转单一提交就冻结发送方余额，
+///   同一笔钱无法被重复花出（`Rejected` / `Error` 不计入，金额自动退回）。
+/// - **收入（接收方）**：**仅 `Confirmed` 计入** —— 待收箱里的一笔在接收方点「接受」
+///   之前不属于接收方；点了接受（状态转 Confirmed、接收方链头推进）才真正到账。
+///
+/// 为什么收支口径要不对称：`Pending` 是「已冻结、待接收方表态」的中间态。对付款方而言钱
+/// 已经花出去了（必须立即扣，否则能重复花）；对收款方而言钱还没到手（不能记账，
+/// 否则「还没点接受就到账」）。两侧都算或都不算都会产生错误语义。
 ///
 /// 收支口径**必须与 `transaction` 里的结算/入账逻辑逐条对应，不可随意增删**：
 /// - 收入：`Mint` / `Issue` / `Transfer` 的收款方
 /// - 支出：`Redeem` / `Transfer` 的付款方
+///
 /// 之所以不对称：`Issue`（发行）是「商品篮子 → A€」的**增发**，`Redeem`（赎回）是
 /// 「A€ → 商品篮子」的**销毁**；发行账户（PreIssuedAccount）只是记账对手方，
 /// 余额不随二者变动。
@@ -183,7 +216,7 @@ pub fn recompute_all_balances(conn: &Connection) -> Result<()> {
     let inc = group_sums(
         conn,
         "SELECT receiver, receiver_type, COALESCE(SUM(amount),0) FROM transactions \
-         WHERE status IN ('Pending','Confirmed') AND tx_type IN ('Mint','Issue','Transfer') \
+         WHERE status='Confirmed' AND tx_type IN ('Mint','Issue','Transfer') \
          GROUP BY receiver, receiver_type",
     )?;
     let out = group_sums(
@@ -218,68 +251,71 @@ pub fn recompute_all_balances(conn: &Connection) -> Result<()> {
 
 /// 重算并回写**单个账户**余额并返回结果（提交交易前刷新发送方余额用）。
 /// 只做两条走索引的 SUM，不触发全库扫描。
-/// 计入口径与 `recompute_all_balances` 一致：`Pending` + `Confirmed` 计入，`Rejected`/`Error` 不计入。
+/// 计入口径与 `recompute_all_balances` 一致（v3.2.1）：
+/// 支出 `Pending`+`Confirmed` 计入；收入**仅 `Confirmed`** 计入（待收不算）。
 pub fn recompute_account(conn: &Connection, uid: &str, atype: AccountType) -> Result<i64> {
-    let table = atype.table_name();
-    let st = atype.as_str();
-    let inc: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(amount),0) FROM transactions \
-             WHERE receiver=?1 AND receiver_type=?2 AND status IN ('Pending','Confirmed') \
-               AND tx_type IN ('Mint','Issue','Transfer')",
-            params![uid, st],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let out: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(amount),0) FROM transactions \
-             WHERE sender=?1 AND sender_type=?2 AND status IN ('Pending','Confirmed') \
-               AND tx_type IN ('Redeem','Transfer')",
-            params![uid, st],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let mut m = HashMap::new();
-    if inc != 0 {
-        m.insert((uid.to_string(), st.to_string()), inc);
-    }
-    let mut m2 = HashMap::new();
-    if out != 0 {
-        m2.insert((uid.to_string(), st.to_string()), out);
-    }
-    let bal = settle_balance(&m, &m2, uid, st);
-    conn.execute(
-        &format!("UPDATE {table} SET balance=?1 WHERE uid=?2"),
-        params![bal, uid],
-    )?;
-    Ok(bal)
+    let received = incoming_confirmed(conn, uid, atype)?;
+    let sent = outgoing_all(conn, uid, atype)?;
+    signed_balance(conn, uid, atype, received, sent)
 }
 
 /// 原始净额（收入 − 支出，**不把负值夹取为 0**）：用于「可支付性」判定。
-/// 口径与 `recompute_account` 完全一致（Pending + Confirmed 计入，Rejected/Error 不计入），
+/// 口径与 `recompute_account` 完全一致（支出 Pending+Confirmed 计入、收入仅 Confirmed 计入），
 /// 仅不做负值兜底 —— 否则透支会被看成「余额 0」而无法识别。
 pub fn raw_balance(conn: &Connection, uid: &str, atype: AccountType) -> Result<i64> {
-    let st = atype.as_str();
-    let inc: i64 = conn
+    Ok(incoming_confirmed(conn, uid, atype)? - outgoing_all(conn, uid, atype)?)
+}
+
+/// 已确认收款合计：`Mint` / `Issue` / `Transfer` 中状态为 `Confirmed` 的部分。
+/// **不含 `Pending`**：待收箱里的钱在接收方点「接受」前不算余额（v3.2.1）。
+fn incoming_confirmed(conn: &Connection, uid: &str, atype: AccountType) -> Result<i64> {
+    Ok(conn
         .query_row(
             "SELECT COALESCE(SUM(amount),0) FROM transactions \
-             WHERE receiver=?1 AND receiver_type=?2 AND status IN ('Pending','Confirmed') \
+             WHERE receiver=?1 AND receiver_type=?2 AND status='Confirmed' \
                AND tx_type IN ('Mint','Issue','Transfer')",
-            params![uid, st],
+            params![uid, atype.as_str()],
             |r| r.get(0),
         )
-        .unwrap_or(0);
-    let out: i64 = conn
+        .unwrap_or(0))
+}
+
+/// 支出合计（含 `Pending`）：`Redeem` / `Transfer` 中状态为 `Pending` / `Confirmed` 的部分。
+/// 含 `Pending` 是刻意的：转单一提交（Pending）就冻结发送方余额，防同一笔钱被重复花出。
+fn outgoing_all(conn: &Connection, uid: &str, atype: AccountType) -> Result<i64> {
+    Ok(conn
         .query_row(
             "SELECT COALESCE(SUM(amount),0) FROM transactions \
              WHERE sender=?1 AND sender_type=?2 AND status IN ('Pending','Confirmed') \
                AND tx_type IN ('Redeem','Transfer')",
-            params![uid, st],
+            params![uid, atype.as_str()],
             |r| r.get(0),
         )
-        .unwrap_or(0);
-    Ok(inc - out)
+        .unwrap_or(0))
+}
+
+/// 把「收入 − 支出」写成该账户余额并返回；负差额按 0 落库并记日志。
+fn signed_balance(
+    conn: &Connection,
+    uid: &str,
+    atype: AccountType,
+    received: i64,
+    sent: i64,
+) -> Result<i64> {
+    let mut inc = HashMap::new();
+    if received != 0 {
+        inc.insert((uid.to_string(), atype.as_str().to_string()), received);
+    }
+    let mut out = HashMap::new();
+    if sent != 0 {
+        out.insert((uid.to_string(), atype.as_str().to_string()), sent);
+    }
+    let bal = settle_balance(&inc, &out, uid, atype.as_str());
+    conn.execute(
+        &format!("UPDATE {} SET balance=?1 WHERE uid=?2", atype.table_name()),
+        params![bal, uid],
+    )?;
+    Ok(bal)
 }
 
 /// 按 (uid, 类型) 取汇总值。
