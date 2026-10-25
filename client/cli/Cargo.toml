@@ -1,0 +1,18 @@
+[package]
+name = "AlphaCoinClientCli"
+version = "3.3.0"
+edition = "2024"
+description = "A€ 客户端 CLI（运维/自动化工具；GUI 见 client/qt 的 AlphaWallet / AlphaBankmanage）"
+license = "MIT"
+
+[[bin]]
+name = "AlphaCoinClientCli"
+path = "src/main.rs"
+
+[dependencies]
+acs-core = { path = "../../core" }
+acs-client-core = { path = "../core" }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"

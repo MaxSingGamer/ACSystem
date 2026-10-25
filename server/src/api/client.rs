@@ -1,0 +1,562 @@
+//! Client（Alpha Wallet）接口：账户开立、交易提交、接收方确认/拒绝、待确认查询。
+//!
+//! 认证：client 凭 ed25519 签名（开立上传公钥、提交/确认用私钥签名）。
+//! 安全：提交前校验 tx_hash 一致性 + 发送方 ed25519 签名；确认前校验接收方签名。
+
+use axum::extract::{Path, Query, State};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use chrono::Utc;
+use rusqlite::{params, Connection};
+use serde::Deserialize;
+use serde_json::json;
+
+use acs_core::account;
+use acs_core::models::{Account, AccountStatus, AccountType, Transaction};
+use acs_core::transaction;
+
+use crate::api::{ApiErr, ApiResult};
+use crate::state::{self, AppState};
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/client/open", post(open_account))
+        .route("/api/client/submit", post(submit))
+        .route("/api/client/confirm", post(confirm))
+        .route("/api/client/reject", post(confirm))
+        .route("/api/client/pending", get(pending))
+        .route("/api/client/pending-nonce", get(pending_nonce))
+        .route("/api/client/fetch-key", post(fetch_key))
+        .route("/api/client/close", post(close_account))
+        // 协议 / 隐私：同时提供「API 路径」与「网页路径」两种形式。
+        // 网页路径 `/legal/{doc}` 供客户端用系统浏览器直接打开（v3.3.0 #3）。
+        .route("/api/legal/{doc}", get(legal_doc))
+        .route("/legal/{doc}", get(legal_doc))
+}
+
+/// 公开：返回协议 / 隐私 HTML（客户端用系统浏览器打开，或注册前展示并获取同意）。
+/// doc: individual-terms / enterprise-terms / privacy
+async fn legal_doc(Path(doc): Path<String>) -> Response {
+    match crate::legal::doc_html(&doc) {
+        Some(html) => Html(html).into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, Json(json!({ "error": "文档不存在" }))).into_response(),
+    }
+}
+
+// ---------- 注销账户（中心侧：状态改 Deleted，账本只读保留） ----------
+
+#[derive(Deserialize)]
+pub struct CloseReq {
+    pub uid: String,
+    #[serde(rename = "type")]
+    pub atype: String,
+    pub close_sig: String, // 账户私钥对 "close:{uid}:{type}" 的 detached 签名
+}
+
+/// 注销：校验账户本人签名后，将状态改为 Deleted（账本与账户信息只读保留，供审计；不可再登录）。
+async fn close_account(
+    State(st): State<AppState>,
+    Json(req): Json<CloseReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let atype = AccountType::from_str(&req.atype)
+        .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+    let msg = format!("close:{}:{}", req.uid, atype.as_str());
+    let pubk = {
+        let conn = state::db_lock(&st.db);
+        account_pubkey(&conn, &req.uid, atype).ok_or_else(|| ApiErr::not_found("账户不存在"))?
+    };
+    if !st
+        .gpg
+        .verify_detached(&pubk, msg.as_bytes(), &req.close_sig)
+        .map_err(ApiErr::from)?
+    {
+        return Err(ApiErr::forbidden("注销签名校验失败"));
+    }
+    let conn = state::db_lock(&st.db);
+    account::set_status(&conn, &req.uid, atype, AccountStatus::Deleted).map_err(ApiErr::from)?;
+    // 云端只保留公钥：删掉口令加密的私钥密文（中心不再持有可解开的私钥材料）
+    account::purge_secret(&conn, &req.uid, atype).map_err(ApiErr::from)?;
+    Ok(Json(json!({
+        "ok": true, "uid": req.uid, "type": atype.as_str(), "status": "Deleted",
+        "message": "账户已注销：中心已删除加密私钥（仅保留公钥），不可再交易"
+    })))
+}
+
+/// 读取账户公钥（用于验签）。
+fn account_pubkey(conn: &Connection, uid: &str, atype: AccountType) -> Option<String> {
+    let table = atype.table_name();
+    let sql = format!("SELECT pubkey FROM {table} WHERE uid=?1");
+    conn.query_row(&sql, params![uid], |r| r.get(0)).ok()
+}
+
+// ---------- 开立账户 ----------
+
+#[derive(Deserialize)]
+pub struct OpenReq {
+    pub uid: String,
+    #[serde(rename = "type")]
+    pub atype: String,
+    /// 全称（v3.3.0 #4/#5）：国家 / 企业必填且同类型唯一；个人 / 系统留空。
+    #[serde(default)]
+    pub fullname: String,
+    pub email: String,
+    pub pubkey: String,
+    #[serde(default)]
+    pub encrypted_seckey: String, // 密码加密私钥（登录取回用；口令不落库）
+    #[serde(default)]
+    pub agree_terms: bool,        // 是否同意《使用协议》
+    #[serde(default)]
+    pub agree_privacy: bool,      // 是否同意《隐私政策》
+}
+
+async fn open_account(
+    State(st): State<AppState>,
+    Json(req): Json<OpenReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let atype = AccountType::from_str(&req.atype)
+        .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+    // 系统账本账户：不接受客户端自助开立（改由 Server 管理后台「系统账本账户登录」）
+    if atype == AccountType::System {
+        return Err(ApiErr::forbidden("系统账本账户不接受客户端自助开立，请通过管理后台操作"));
+    }
+    if req.uid.trim().is_empty() || req.email.trim().is_empty() || req.pubkey.trim().is_empty() {
+        return Err(ApiErr::bad_request("uid/email/pubkey 均不能为空"));
+    }
+    // 校验公钥是有效 armored（解析指纹），防止垃圾数据
+    let fp = st
+        .gpg
+        .fingerprint_of_armored_pubkey(&req.pubkey)
+        .map_err(|_| ApiErr::bad_request("公钥格式无效（需为 gpg armored）"))?;
+
+    let conn = state::db_lock(&st.db);
+    if account::account_exists(&conn, &req.uid, atype)? {
+        return Err(ApiErr::bad_request("账户已存在"));
+    }
+    // 注（v3.3.0 #2）：**已取消「成员国家 / 企业认定」前置条件**。
+    // 国家 / 企业账户与个人账户一样，凭「同意《使用协议》与《隐私政策》」即可注册。
+    // 注（v3.3.0 #4/#5）：国家 / 企业需额外满足「简称规则 + 全称必填且同类型唯一」
+    // （uid 即简称：国家 2 位大写字母、企业 4 位大写字母）。
+    let uid = req.uid.trim().to_string();
+    let fullname = req.fullname.trim().to_string();
+    account::validate_new_account(&conn, &uid, atype, &fullname)?;
+    let now = Utc::now();
+    let acc = Account {
+        uid: uid.clone(),
+        account_type: atype,
+        fullname,
+        email: req.email.trim().to_string(),
+        pubkey: req.pubkey.trim().to_string(),
+        encrypted_seckey: req.encrypted_seckey.trim().to_string(), // 密码加密私钥（登录取回用）
+        balance: 0,
+        status: AccountStatus::Active,
+        last_tx_hash: Some(transaction::account_chain_seed(&uid, atype)),
+        created_at: now,
+        changed_at: now,
+    };
+    account::create_account(&conn, &acc)?;
+    // 注册须先同意《使用协议》/《隐私政策》（服务端二次校验并记录同意标识）。
+    // 注：不保存任何口令哈希——私钥本身由用户口令加密（GPG S2K），口令不落库、不传输。
+    if !req.agree_terms || !req.agree_privacy {
+        return Err(ApiErr::forbidden("注册须先同意《使用协议》与《隐私政策》"));
+    }
+    conn.execute(
+        &format!(
+            "UPDATE {} SET last_login=?2, agree_terms=?3, agree_privacy=?4 WHERE uid=?1",
+            atype.table_name()
+        ),
+        params![
+            acc.uid.clone(),
+            now.timestamp(),
+            i64::from(req.agree_terms),
+            i64::from(req.agree_privacy)
+        ],
+    )
+    .map_err(ApiErr::from_err)?;
+    Ok(Json(json!({ "ok": true, "uid": acc.uid, "type": atype.as_str(), "fingerprint": fp, "balance": 0 })))
+}
+
+// ---------- 登录取回加密私钥 ----------
+
+#[derive(Deserialize)]
+pub struct FetchKeyReq {
+    pub uid: String,
+    #[serde(rename = "type", default)]
+    pub atype: String, // 可空：空则按 UID 在所有账户类型中自动匹配
+    #[serde(default)]
+    pub agree_terms: bool,   // 是否已同意《使用协议》
+    #[serde(default)]
+    pub agree_privacy: bool, // 是否已同意《隐私政策》
+}
+
+/// `fetch-key` 限流：单账户每小时上限（`ACS_FETCH_KEY_MAX_PER_HOUR`，默认 10）。
+fn fetch_key_max_per_account() -> usize {
+    std::env::var("ACS_FETCH_KEY_MAX_PER_HOUR")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(10)
+}
+
+/// `fetch-key` 限流：全局每小时上限（`ACS_FETCH_KEY_GLOBAL_MAX_PER_HOUR`，默认 2000）。
+/// 用于拦住「换 uid 批量枚举」——单账户限额拦不住这种遍历。
+fn fetch_key_max_global() -> usize {
+    std::env::var("ACS_FETCH_KEY_GLOBAL_MAX_PER_HOUR")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(2000)
+}
+
+/// 限流窗口（秒）。
+const FETCH_WINDOW_SECS: i64 = 3600;
+
+/// 全局限流计数器在 key_fetch_hits 中的保留键（uid 不可能为它）。
+const FETCH_GLOBAL_KEY: &str = "__all__";
+
+/// 检查并记录一次 `fetch-key` 请求；超限返回 429。
+///
+/// 注：窗口为内存态（重启清零）。因服务端通常在反向代理（frp）之后、真实客户端 IP
+/// 不可得，故不按 IP 限流，而是「单账户 + 全局」双窗口。
+fn check_fetch_rate(st: &AppState, uid: &str) -> Result<(), ApiErr> {
+    let per_max = fetch_key_max_per_account();
+    let global_max = fetch_key_max_global();
+    let now = chrono::Utc::now().timestamp();
+    let mut hits = state::key_fetch_hits_lock(st);
+
+    // 防内存膨胀：条目过多时清理已过期的 key（全局键始终保留）。
+    // 每个键内部按时间递增，淘汰只从队首弹出，不再每次都全量扫描。
+    if hits.len() > 5_000 {
+        hits.retain(|k, v| {
+            v.prune(now, FETCH_WINDOW_SECS);
+            k == FETCH_GLOBAL_KEY || v.len() > 0
+        });
+    }
+
+    {
+        let g = hits.entry(FETCH_GLOBAL_KEY.to_string()).or_default();
+        // 全局：达到上限即拒绝（`>=`；此前单账户那处误用 `>`，相当于多放行一次）
+        if g.prune(now, FETCH_WINDOW_SECS) >= global_max {
+            return Err(ApiErr::too_many_requests(
+                "服务端密钥取回请求过于频繁，请稍后再试",
+            ));
+        }
+        g.push(now);
+    }
+    {
+        let per = hits.entry(uid.to_string()).or_default();
+        if per.prune(now, FETCH_WINDOW_SECS) >= per_max {
+            return Err(ApiErr::too_many_requests(format!(
+                "该账户取回密钥过于频繁（每小时上限 {per_max} 次），请稍后再试"
+            )));
+        }
+        per.push(now);
+    }
+    Ok(())
+}
+
+/// 客户端登录：按 uid/type 返回加密私钥与账户信息（供本机缓存或跨设备恢复）。
+/// **服务端不保存、不接收、不校验任何口令材料**：私钥由用户口令加密（GPG S2K），
+/// 客户端本地用口令解开即完成校验。正因如此，返回密文的唯一凭据就是 uid ——
+/// 故此处必须限流防枚举（见 `check_fetch_rate`：单账户 + 全局双窗口，环境变量可调）。
+/// v3.1.0：登录请求须携带协议同意标识；未同意则服务端拒绝（客户端也应前置拦截）。
+async fn fetch_key(
+    State(st): State<AppState>,
+    Json(req): Json<FetchKeyReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !req.agree_terms || !req.agree_privacy {
+        return Err(ApiErr::forbidden("登录须先同意《使用协议》与《隐私政策》"));
+    }
+    check_fetch_rate(&st, &req.uid)?;
+    // 类型：指定则单类型；否则按 UID 在全部账户类型中自动匹配
+    let atypes: Vec<AccountType> = if req.atype.trim().is_empty() {
+        vec![
+            AccountType::Individual,
+            AccountType::Country,
+            AccountType::Company,
+            AccountType::System,
+        ]
+    } else {
+        let t = AccountType::from_str(&req.atype)
+            .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+        vec![t]
+    };
+    let conn = state::db_lock(&st.db);
+    for atype in atypes {
+        // 不再校验口令哈希：私钥本身由用户口令加密（GPG S2K），"能否解开"即口令是否正确的唯一判据。
+        // 这里只确认该类型下账户存在且可用，然后返回其加密私钥。
+        let Some(acc) = account::get_account(&conn, &req.uid, atype)? else {
+            continue;
+        };
+        if acc.status != AccountStatus::Active {
+            return Err(ApiErr::forbidden("该账户已注销/冻结，无法登录"));
+        }
+        // 系统账本账户：客户端不再支持登录（改由管理后台操作）
+        if atype == AccountType::System {
+            return Err(ApiErr::forbidden(
+                "系统账本账户请通过 Server 管理后台「系统账本账户登录」操作，客户端已取消系统账户登录",
+            ));
+        }
+        // 记录最近登录时间与协议同意标识（不涉及口令）
+        let _ = conn.execute(
+            &format!(
+                "UPDATE {} SET last_login=?1, agree_terms=?2, agree_privacy=?3 WHERE uid=?4",
+                atype.table_name()
+            ),
+            params![
+                chrono::Utc::now().timestamp(),
+                i64::from(req.agree_terms),
+                i64::from(req.agree_privacy),
+                req.uid
+            ],
+        );
+        return Ok(Json(json!({
+            "ok": true,
+            "uid": acc.uid,
+            "type": atype.as_str(),
+            "email": acc.email,
+            "encrypted_seckey": acc.encrypted_seckey,
+        })));
+    }
+    Err(ApiErr::not_found("账户不存在"))
+}
+
+// ---------- 提交交易 ----------
+
+#[derive(Deserialize)]
+pub struct SubmitReq {
+    pub tx: Transaction,
+}
+
+async fn submit(
+    State(st): State<AppState>,
+    Json(req): Json<SubmitReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut tx = req.tx;
+
+    // 1) 校验 tx_hash 一致（防篡改）
+    let expect = transaction::compute_tx_hash(&tx);
+    if tx.tx_hash != expect {
+        return Err(ApiErr::bad_request("交易哈希不一致（tx 被篡改）"));
+    }
+
+    // 2) 校验客户端时间戳。ts 由客户端自填且参与 tx_hash，不校验等于账本时间轴可被任意伪造；
+    //    权威时间另存 received_at（服务端时钟，客户端无法影响）。
+    //    容忍度：未来 5 分钟（时钟误差）、历史 7 天（客户端出件箱可能延后重试提交）。
+    let now = chrono::Utc::now().timestamp();
+    if tx.timestamp > now + 300 {
+        return Err(ApiErr::bad_request("交易时间戳超出允许范围（客户端时钟可能不准）"));
+    }
+    if tx.timestamp < now - 7 * 86_400 {
+        return Err(ApiErr::bad_request("交易时间戳过于陈旧（请校准客户端时钟后重试）"));
+    }
+    tx.received_at = now;
+
+    // 3) 校验发送方存在 + 公钥签名
+    let (sender_pub, sender_atype) = {
+        let conn = state::db_lock(&st.db);
+        let pubk = account_pubkey(&conn, &tx.sender, tx.sender_type)
+            .ok_or_else(|| ApiErr::not_found(format!("发送方账户不存在: {}", tx.sender)))?;
+        (pubk, tx.sender_type)
+    };
+    if !st
+        .gpg
+        .verify_detached(&sender_pub, tx.tx_hash.as_bytes(), &tx.sender_sig)
+        .map_err(ApiErr::from)?
+    {
+        return Err(ApiErr::forbidden("发送方签名校验失败"));
+    }
+
+    // 4) 校验接收方存在（Transfer/Issue/Redeem 均需目标账户）
+    {
+        let conn = state::db_lock(&st.db);
+        if !account::account_exists(&conn, &tx.receiver, tx.receiver_type)? {
+            return Err(ApiErr::not_found(format!("接收方账户不存在: {}", tx.receiver)));
+        }
+        // 防止伪造他人为发送方：sender_type 由签名绑定，但再校验发送方与 apikey 无绑定关系，
+        // 因此依赖签名有效性（已校验）。
+        let _ = sender_atype;
+    }
+
+    // 5) 提交（Pending）；提交前只重算「发送方」余额，保证余额判断准确
+    //    （全量重算代价高且会长时间持有全局库锁，交由 /api/sync 低频触发）
+    //    注：接收方此刻既不入账也不推进链头 —— 待收（Pending 收款）不算接收方余额，
+    //    要等接收方点「接受」（/api/client/confirm）才到账（v3.2.1 口径）
+    let mut conn = state::db_lock(&st.db);
+    acs_core::account::recompute_account(&conn, &tx.sender, tx.sender_type)?;
+    transaction::submit_tx(&mut conn, &tx)?;
+    Ok(Json(json!({ "ok": true, "tx_id": tx.tx_id, "status": "Pending" })))
+}
+
+// ---------- 接收方确认 / 拒绝 ----------
+
+#[derive(Deserialize)]
+pub struct ConfirmReq {
+    pub tx_id: String,
+    pub receiver_sig: String, // 接收方用私钥对 tx_id 的 detached 签名
+    pub reject_reason: Option<String>,
+}
+
+async fn confirm(
+    State(st): State<AppState>,
+    Json(req): Json<ConfirmReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let reason = req.reject_reason.clone();
+    let (receiver, rtype, pubk) = {
+        let conn = state::db_lock(&st.db);
+        let tx = transaction::get_transaction(&conn, &req.tx_id)
+            .map_err(ApiErr::from)?
+            .ok_or_else(|| ApiErr::not_found("交易不存在"))?;
+        if tx.status != acs_core::models::TransactionStatus::Pending {
+            return Err(ApiErr::bad_request("该交易已处理"));
+        }
+        let pubk = account_pubkey(&conn, &tx.receiver, tx.receiver_type)
+            .ok_or_else(|| ApiErr::not_found("接收方账户不存在"))?;
+        (tx.receiver, tx.receiver_type, pubk)
+    };
+    // 校验接收方签名（对 tx_id）
+    if !st
+        .gpg
+        .verify_detached(&pubk, req.tx_id.as_bytes(), &req.receiver_sig)
+        .map_err(ApiErr::from)?
+    {
+        return Err(ApiErr::forbidden("接收方签名校验失败"));
+    }
+    let mut conn = state::db_lock(&st.db);
+    match reason.as_deref() {
+        Some(r) if !r.trim().is_empty() => {
+            transaction::reject_tx(&mut conn, &req.tx_id, &receiver, rtype, r)?;
+            Ok(Json(json!({ "ok": true, "tx_id": req.tx_id, "status": "Rejected" })))
+        }
+        _ => {
+            transaction::confirm_tx(&mut conn, &req.tx_id, &receiver, rtype, &req.receiver_sig)?;
+            Ok(Json(json!({ "ok": true, "tx_id": req.tx_id, "status": "Confirmed" })))
+        }
+    }
+}
+
+// ---------- 待确认查询 ----------
+
+// ---------- 待收箱查询（需接收方签名） ----------
+
+/// 待收箱查询的挑战值有效期（秒）。
+const PENDING_NONCE_TTL_SECS: i64 = 120;
+
+/// 待收箱签名消息（服务端与客户端必须一致）：`pending:{uid}:{type}:{nonce}`。
+pub fn pending_sig_message(uid: &str, atype: &str, nonce: &str) -> String {
+    format!("pending:{uid}:{atype}:{nonce}")
+}
+
+#[derive(Deserialize)]
+pub struct PendingNonceQuery {
+    pub uid: String,
+    #[serde(rename = "type", default = "default_type")]
+    pub atype: String,
+}
+
+/// 公开：签发一次性挑战值（nonce）。
+///
+/// **不含任何隐私数据**，只是「请对这个串签名」，故可匿名调用；真正的待收明细必须带
+/// 签名才取得到（见 `pending`）。既保留客户端无状态取数，又堵住
+/// 「枚举 uid 即可拉取他人待收明细」的漏洞。
+async fn pending_nonce(
+    State(st): State<AppState>,
+    Query(q): Query<PendingNonceQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let atype = AccountType::from_str(&q.atype)
+        .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+    let uid = q.uid.trim().to_string();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let now = chrono::Utc::now().timestamp();
+    {
+        let mut map = state::pending_nonce_lock(&st);
+        map.retain(|_, (_, exp)| *exp > now); // 顺手清理，避免内存堆积
+        map.insert(
+            (uid.clone(), atype.as_str().to_string()),
+            (nonce.clone(), now + PENDING_NONCE_TTL_SECS),
+        );
+    }
+    Ok(Json(json!({
+        "uid": uid,
+        "type": atype.as_str(),
+        "nonce": nonce,
+        "expires_in": PENDING_NONCE_TTL_SECS,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct PendingQuery {
+    pub uid: String,
+    #[serde(rename = "type", default = "default_type")]
+    pub atype: String,
+    /// 接收方私钥对 `pending:{uid}:{type}:{nonce}` 的分离签名（armored）。
+    #[serde(default)]
+    pub sig: String,
+    #[serde(default)]
+    pub nonce: String,
+}
+
+fn default_type() -> String {
+    "Individual".to_string()
+}
+
+/// 待收箱：**必须携带接收方签名**（防止仅凭 uid 枚举他人待收明细）。
+///
+/// 校验顺序：nonce 有效且一次性 → 用该账户公钥验签；任一步失败都**不透露任何交易信息**。
+async fn pending(
+    State(st): State<AppState>,
+    Query(q): Query<PendingQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let atype = AccountType::from_str(&q.atype)
+        .ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
+    let uid = q.uid.trim().to_string();
+    if q.sig.trim().is_empty() || q.nonce.trim().is_empty() {
+        return Err(ApiErr::unauthorized(
+            "待收箱查询需携带签名：先取 nonce（/api/client/pending-nonce），用账户私钥签名后重试",
+        ));
+    }
+    // 1) nonce 必须存在、未过期、且匹配（一次性，用过即作废防重放）
+    let now = chrono::Utc::now().timestamp();
+    {
+        let mut map = state::pending_nonce_lock(&st);
+        map.retain(|_, (_, exp)| *exp > now);
+        let key = (uid.clone(), atype.as_str().to_string());
+        match map.get(&key) {
+            Some((n, exp)) if *exp > now && n == q.nonce.trim() => {
+                map.remove(&key);
+            }
+            _ => return Err(ApiErr::unauthorized("nonce 无效或已过期，请重新获取")),
+        }
+    }
+    // 2) 验签
+    let msg = pending_sig_message(&uid, atype.as_str(), q.nonce.trim());
+    let pubk = {
+        let conn = state::db_lock(&st.db);
+        account_pubkey(&conn, &uid, atype).ok_or_else(|| ApiErr::not_found("账户不存在"))?
+    };
+    if !st
+        .gpg
+        .verify_detached(&pubk, msg.as_bytes(), &q.sig)
+        .map_err(ApiErr::from)?
+    {
+        return Err(ApiErr::forbidden("签名校验失败（请确认使用该账户私钥签名）"));
+    }
+    // 3) 通过后才返回明细
+    let conn = state::db_lock(&st.db);
+    let txs = transaction::list_pending_for(&conn, &uid, atype)?;
+    let items: Vec<serde_json::Value> = txs
+        .iter()
+        .map(|t| {
+            json!({
+                "tx_id": t.tx_id,
+                "tx_type": t.tx_type.as_str(),
+                "sender": t.sender,
+                "sender_type": t.sender_type.as_str(),
+                "amount": t.amount,
+                "timestamp": t.timestamp,
+                "tx_hash": t.tx_hash,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "uid": uid, "items": items })))
+}

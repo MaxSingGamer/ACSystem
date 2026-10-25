@@ -1,0 +1,23 @@
+[package]
+name = "acs-client-core"
+version = "3.3.0"
+edition = "2024"
+description = "A€（Alpha Coin）客户端业务核心：钱包/账本/网络/gpg；供 Tauri 客户端与 QT 客户端（DLL）共用"
+
+[lib]
+name = "acs_client_core"
+# rlib：供 acs-client（Tauri）与 CLI 依赖；
+# cdylib：产出 acs_client_core.dll 供 Qt/C++ 通过 C ABI 调用（D12）。
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+acs-core = { path = "../../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+rusqlite = { version = "0.40", features = ["bundled"] }
+anyhow = "1"

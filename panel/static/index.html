@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlphaCoin 服务中心面板</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <div class="topbar">
+    <div class="brand"><span class="logo">A€</span> AlphaCoin <span class="muted">服务中心面板</span></div>
+    <span class="sp"></span>
+    <span class="muted" id="panelAddr"></span>
+    <button class="btn btn-ghost" id="btnSettings">面板设置</button>
+    <button class="btn btn-ghost" id="btnImport">导入服务包</button>
+    <button class="btn btn-primary" id="btnCreate">新建服务</button>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div><div class="k">服务数量</div><div class="v" id="statCount">–</div></div>
+    <div><div class="k">运行中</div><div class="v" id="statRunning">–</div></div>
+    <div><div class="k">面板端口</div><div class="v" id="statPanelPort">–</div></div>
+    <div><div class="k">服务根目录</div><div class="v small" id="statRoot">–</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>中心服务</h2>
+      <span class="sp"></span>
+      <button class="btn btn-sm" id="btnRefresh">刷新</button>
+    </div>
+    <table>
+      <thead><tr>
+        <th>名称</th><th>域名</th><th>API 端口</th><th>管理端口</th><th>状态</th><th>操作</th>
+      </tr></thead>
+      <tbody id="svcBody"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </section>
+</main>
+
+<!-- ============ 通用弹窗 ============ -->
+<div class="modal-wrap hidden" id="modalWrap">
+  <div class="modal">
+    <div class="modal-head"><h3 id="modalTitle"></h3><span class="sp"></span><button class="btn btn-ghost btn-sm" id="modalClose">✕</button></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot">
+      <div class="error" id="modalError"></div>
+      <span class="sp"></span>
+      <button class="btn" id="modalCancel">取消</button>
+      <button class="btn btn-primary" id="modalOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

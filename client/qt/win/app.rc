@@ -1,0 +1,5 @@
+// Windows 资源：把 DPI 感知清单嵌入 exe（v3.3.0 界面优化）。
+// 没有清单时 Windows 会把窗口当 DPI 不感知程序做位图拉伸 → 高分屏文字发虚。
+1 RT_MANIFEST "app.manifest"
+
+IDI_ICON1 ICON "icon-client.ico"
