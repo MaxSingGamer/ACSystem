@@ -1,17 +1,11 @@
 [package]
 name = "acs-server"
-version = "3.3.0"
+version = "4.0.0"
 edition = "2024"
-build = "build.rs"
 
 [[bin]]
-# v3.3.0 #1：产物名用产品名（crate 包名仍为 acs-server，内部标识不变）
 name = "AlphaCoinServer"
 path = "src/main.rs"
-
-[build-dependencies]
-# 嵌入图标等 Windows 资源（build.rs + acs-server.rc）
-embed-resource = "3.0"
 
 [dependencies]
 acs-core = { path = "../core" }
@@ -26,6 +20,5 @@ sha2 = "0.11.0"
 uuid = { version = "1", features = ["v4"] }
 hex = "0.4"
 anyhow = "1"
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "native-tls"] }
 aes-gcm = "0.10"
 rand = "0.8"

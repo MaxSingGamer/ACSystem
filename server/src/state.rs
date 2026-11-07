@@ -63,6 +63,11 @@ pub fn key_fetch_hits_lock(st: &AppState) -> MutexGuard<'_, HashMap<String, KeyF
     lock(&st.key_fetch_hits)
 }
 
+/// 管理后台登录限流窗口（key = 来源 IP）。
+pub fn admin_login_hits_lock(st: &AppState) -> MutexGuard<'_, HashMap<String, KeyFetchHits>> {
+    lock(&st.admin_login_hits)
+}
+
 /// 根管理员密钥解锁态。
 pub fn central_lock(st: &AppState) -> MutexGuard<'_, CentralState> {
     lock(&st.central)
@@ -133,6 +138,9 @@ pub struct AppState {
     /// `fetch-key` 限流窗口：key = uid，另用 `__all__` 记录全局计数，值为最近请求时间戳（秒，递增）。
     /// 为何存在：`fetch-key` 仅凭 uid 就能取回加密私钥（无口令校验），必须防枚举遍历。
     pub key_fetch_hits: Arc<Mutex<HashMap<String, KeyFetchHits>>>,
+    /// 管理后台登录限流窗口：key = 来源 IP（含 X-Forwarded-For），值为最近登录尝试时间戳。
+    /// 为何存在：账号不存在时无法用「账号失败计数」锁定，必须按 IP 限速防在线爆破（F8）。
+    pub admin_login_hits: Arc<Mutex<HashMap<String, KeyFetchHits>>>,
     /// `pending`（私人待收箱）的一次性挑战值：(uid, type) -> (nonce, 过期时间戳)。
     /// 为何存在：待收明细含发送方/金额/时间，**属私人数据**，不能仅凭 uid 枚举拉取；
     /// 客户端先取 nonce、用账户私钥签名后凭签名查询（见 api/client.rs::pending）。
@@ -188,6 +196,7 @@ impl AppState {
             service_name,
             login_fails: Arc::new(Mutex::new(HashMap::new())),
             key_fetch_hits: Arc::new(Mutex::new(HashMap::new())),
+            admin_login_hits: Arc::new(Mutex::new(HashMap::new())),
             pending_nonce: Arc::new(Mutex::new(HashMap::new())),
         }
     }

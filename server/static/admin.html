@@ -14,9 +14,9 @@
     <span class="who" id="who"></span>
     <span class="muted" id="mkState" style="font-size:12.5px"></span>
     <button class="link-btn" title="明暗主题切换" onclick="toggleTheme()">🌓</button>
-    <a class="link-btn" href="/sys" style="font-weight:600">系统账本</a>
-    <button class="link-btn" onclick="showChg()">修改密码</button>
-    <button class="link-btn" onclick="logout()">退出</button>
+    <a class="link-btn" href="/sys">🏦 系统账本账户登录</a>
+    <button class="link-btn" onclick="sec('my')">👤 我的</button>
+    <button class="link-btn" onclick="logout()">🚪 退出</button>
   </div>
 </header>
 
@@ -24,6 +24,7 @@
   <div class="sections">
     <div class="section-tab on" data-s="ov" onclick="sec('ov')">状态</div>
     <div class="section-tab" data-s="acc" onclick="sec('acc')">账本账户</div>
+    <div class="section-tab" data-s="my" onclick="sec('my')">我的</div>
     <div class="section-tab" data-s="aud" onclick="sec('aud')">审计</div>
   </div>
 
@@ -67,6 +68,25 @@
     </div>
   </div>
 
+  <!-- 我的（v4.0.0 Server #10） -->
+  <div class="section" id="s-my">
+    <div class="cols2">
+      <div class="panel">
+        <h2>我的信息</h2>
+        <div class="kv" id="myInfo"><span>加载中…</span></div>
+      </div>
+      <div class="panel">
+        <h2>修改我的密码</h2>
+        <div class="muted" style="margin-bottom:12px">修改后需重新登录。新密码需输入两次以确认。</div>
+        <label>原密码</label><input id="myOld" type="password" autocomplete="current-password">
+        <label>新密码（≥8 位）</label><input id="myNew" type="password" autocomplete="new-password">
+        <label>再次输入新密码</label><input id="myNew2" type="password" autocomplete="new-password">
+        <button class="btn-primary" style="margin-top:14px" onclick="doMyChg()">确认修改</button>
+        <div class="msg" id="myMsg"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="section" id="s-aud">
     <div class="panel" id="billPanel">
       <h2>交易总账单</h2>
@@ -77,17 +97,6 @@
       <table><thead><tr><th>时间</th><th>类型</th><th>发送方</th><th>接收方</th><th>金额</th><th>状态</th><th>中心签名</th></tr></thead>
       <tbody id="billBody"></tbody></table>
     </div>
-  </div>
-</div>
-
-<div class="hidden" id="chgPanel" style="position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:50">
-  <div class="login-card" style="margin:0">
-    <h1>修改密码</h1>
-    <label>原密码</label><input id="cOld" type="password">
-    <label>新密码（≥8 位）</label><input id="cNew" type="password">
-    <button class="btn-primary" style="width:100%;margin-top:16px" onclick="doChg()">确认修改</button>
-    <div class="msg" id="cMsg"></div>
-    <button class="link-btn" style="width:100%;margin-top:8px" onclick="$('chgPanel').classList.add('hidden')">取消</button>
   </div>
 </div>
 

@@ -14,9 +14,9 @@
     <span class="who" id="who"></span>
     <span class="muted" id="mkState" style="font-size:12.5px"></span>
     <button class="link-btn" title="明暗主题切换" onclick="toggleTheme()">🌓</button>
-    <a class="link-btn" href="/sys" style="font-weight:600">系统账本</a>
-    <button class="link-btn" onclick="showChg()">修改密码</button>
-    <button class="link-btn" onclick="logout()">退出</button>
+    <a class="link-btn" href="/sys">🏦 系统账本账户登录</a>
+    <button class="link-btn" onclick="sec('my')">👤 我的</button>
+    <button class="link-btn" onclick="logout()">🚪 退出</button>
   </div>
 </header>
 
@@ -24,6 +24,7 @@
   <div class="sections">
     <div class="section-tab on" data-s="ov" onclick="sec('ov')">状态</div>
     <div class="section-tab" data-s="acc" onclick="sec('acc')">账户</div>
+    <div class="section-tab" data-s="my" onclick="sec('my')">我的</div>
     <div class="section-tab" data-s="safe" onclick="sec('safe')">安全</div>
     <div class="section-tab" data-s="aud" onclick="sec('aud')">审计</div>
   </div>
@@ -48,36 +49,57 @@
     </div>
   </div>
 
-  <!-- 账户 -->
+  <!-- 账户：两个栏（账本账户 / 管理员） -->
   <div class="section" id="s-acc">
-    <div class="panel">
-      <h2>A€ 账户</h2>
-      <div class="row">
-        <select id="accType" style="width:180px">
-          <option>Country</option><option>Company</option><option>Individual</option><option>System</option>
-        </select>
-        <input id="accSearch" placeholder="搜索 UID" style="width:220px" onkeydown="if(event.key==='Enter')loadAccounts()">
-        <button class="btn-primary btn-sm" onclick="loadAccounts()">查询</button>
-        <span class="sp"></span>
-        <span class="muted">系统账户：PreIssuedAccount / AESystem / AlphaEU</span>
+    <div class="cols2">
+      <div class="panel">
+        <h2>账本账户</h2>
+        <div class="muted" style="margin-bottom:12px">可查询并冻结 / 解冻任意类型账本账户（不可注册或删除）。</div>
+        <div class="row">
+          <select id="accType" style="width:150px" onchange="loadAccounts()">
+            <option>Country</option><option>Company</option><option>Individual</option><option>System</option>
+          </select>
+          <input id="accSearch" placeholder="搜索 UID" style="width:150px" onkeydown="if(event.key==='Enter')loadAccounts()">
+          <button class="btn-primary btn-sm" onclick="loadAccounts()">查询</button>
+        </div>
+        <table><thead><tr><th>简称</th><th>全称</th><th>余额</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="accBody"></tbody></table>
       </div>
-      <table><thead><tr><th>简称</th><th>全称</th><th>邮箱</th><th>余额</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody id="accBody"></tbody></table>
+
+      <div class="panel">
+        <h2>管理员</h2>
+        <div class="muted" style="margin-bottom:12px">
+          根管理员可创建 / 停用 / 启用 / 重置 <b>普通管理员（Admin）</b> 的密码。
+          根管理员账户首启后不可增减，且根管理员密码只能由本人在「我的」页修改。
+        </div>
+        <div class="row">
+          <input id="aUid" placeholder="新管理员 UID" style="width:150px">
+          <input id="aPwd" type="password" placeholder="初始密码（≥8 位）" style="width:150px">
+          <input id="aPwd2" type="password" placeholder="再次输入初始密码" style="width:150px">
+          <button class="btn-primary btn-sm" onclick="createAdmin()">创建管理员</button>
+        </div>
+        <table><thead><tr><th>UID</th><th>角色</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="adminBody"></tbody></table>
+      </div>
     </div>
-    <div class="panel">
-      <h2>后台管理员账户（Admin）</h2>
-      <div class="muted" style="margin-bottom:12px">
-        根管理员可创建 / 停用 / 启用 / 重置 <b>管理员（Admin）</b> 账户。
-        <b>根管理员账户首启后不可增减</b>（由首次启动时的 <code>ACS_ROOT_ACCOUNTS</code> 决定），
-        且根管理员密码只能由本人修改。
+  </div>
+
+  <!-- 我的（v4.0.0 Server #10：自身信息 + 改自身密码） -->
+  <div class="section" id="s-my">
+    <div class="cols2">
+      <div class="panel">
+        <h2>我的信息</h2>
+        <div class="kv" id="myInfo"><span>加载中…</span></div>
       </div>
-      <div class="row">
-        <input id="aUid" placeholder="新管理员 UID" style="width:180px">
-        <input id="aPwd" type="password" placeholder="初始密码（≥8 位）" style="width:180px">
-        <button class="btn-primary btn-sm" onclick="createAdmin()">创建管理员</button>
+      <div class="panel">
+        <h2>修改我的密码</h2>
+        <div class="muted" style="margin-bottom:12px">修改后需重新登录。新密码需输入两次以确认。</div>
+        <label>原密码</label><input id="myOld" type="password" autocomplete="current-password">
+        <label>新密码（≥8 位）</label><input id="myNew" type="password" autocomplete="new-password">
+        <label>再次输入新密码</label><input id="myNew2" type="password" autocomplete="new-password">
+        <button class="btn-primary" style="margin-top:14px" onclick="doMyChg()">确认修改</button>
+        <div class="msg" id="myMsg"></div>
       </div>
-      <table><thead><tr><th>UID</th><th>角色</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody id="adminBody"></tbody></table>
     </div>
   </div>
 
@@ -131,17 +153,16 @@
   </div>
 </div>
 
-<!-- 修改密码弹窗 -->
-<div class="hidden" id="chgPanel" style="position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:50">
+<!-- 重置管理员密码弹窗（v4.0.0 Server #8：入口在「账户」页的「管理员」栏） -->
+<div class="hidden" id="resetPanel" style="position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:50">
   <div class="login-card" style="margin:0">
-    <h1>修改密码</h1>
-    <div class="sub">登录后才能修改</div>
-    <label>原密码（改自己时必填）</label><input id="cOld" type="password">
-    <label>新密码（≥8 位）</label><input id="cNew" type="password">
-    <label>目标账号（根管理员重置「管理员」密码时填写，可为空=改自己）</label><input id="cTarget" placeholder="如 alpha_admin">
-    <button class="btn-primary" style="width:100%;margin-top:16px" onclick="doChg()">确认修改</button>
-    <div class="msg" id="cMsg"></div>
-    <button class="link-btn" style="width:100%;margin-top:8px" onclick="$('chgPanel').classList.add('hidden')">取消</button>
+    <h1>重置管理员密码</h1>
+    <div class="sub" id="resetWho"></div>
+    <label>新密码（≥8 位）</label><input id="rNew" type="password" autocomplete="new-password">
+    <label>再次输入新密码</label><input id="rNew2" type="password" autocomplete="new-password">
+    <button class="btn-primary" style="width:100%;margin-top:16px" onclick="doReset()">确认重置</button>
+    <div class="msg" id="rMsg"></div>
+    <button class="link-btn" style="width:100%;margin-top:8px" onclick="$('resetPanel').classList.add('hidden')">取消</button>
   </div>
 </div>
 

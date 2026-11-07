@@ -41,6 +41,44 @@ pub struct SyncResult {
     pub central_sig: Option<String>,
 }
 
+/// HTTP 头不能含换行：把 gpg armored 签名压成单行 base64
+/// （去掉 armor 头尾与校验和行，仅保留 body）。服务端收到后会重新包装成 armored 再验签。
+fn signature_header(armored: &str) -> String {
+    armored
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("-----") && !l.starts_with('='))
+        .collect::<String>()
+}
+
+/// 带账户签名的增量同步请求（v4.0.0 F4：/api/sync 不再允许匿名拉取账本）。
+///
+/// 签名消息与服务器约定一致：`sync:{uid}:{type}:{since}:{ts}`，
+/// 通过 `X-ACS-Uid / X-ACS-Type / X-ACS-Ts / X-ACS-Sig` 头发送。
+fn signed_sync_get(w: &Wallet, since: i64) -> Result<ureq::Response> {
+    let server = w.info.server_url.trim().trim_end_matches('/');
+    if server.is_empty() {
+        return Err(anyhow!("尚未配置中心服务器地址（请在设置中填写 server_url）"));
+    }
+    let uid = w.info.uid.clone();
+    let atype = w.info.atype.as_str().to_string();
+    let ts = chrono::Utc::now().timestamp();
+    let msg = format!("sync:{uid}:{atype}:{since}:{ts}");
+    let sig = w
+        .sign_with(msg.as_bytes(), None)
+        .map_err(|e| anyhow!("同步需要账户签名（请重新登录以恢复会话口令）：{e}"))?;
+    let sig = signature_header(&sig);
+    shared_agent()
+        .get(&format!("{server}/api/sync?since={since}"))
+        .set("X-ACS-Uid", &uid)
+        .set("X-ACS-Type", &atype)
+        .set("X-ACS-Ts", &ts.to_string())
+        .set("X-ACS-Sig", &sig)
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .map_err(|e| anyhow!("连接中心失败：{e}"))
+}
+
 /// 同步：直接从中心服务器拉取增量（v3.0.0 取消镜像，不再发现多个端点）。
 /// `since` 取**上次同步到的中心时间**（`synced_at` 写的是服务端 `server_time`，
 /// 不能用本机时钟，否则会漏掉刚确认的交易、镜像链头也会滞留）。client 免 apikey。
@@ -50,14 +88,11 @@ pub fn pull(w: &Wallet) -> Result<SyncResult> {
         return Err(anyhow!("尚未配置中心服务器地址（请在设置中填写 server_url）"));
     }
 
-    // 1) 中心直接拉增量（GET /api/sync?since=X）
+    // 1) 中心直接拉增量（GET /api/sync?since=X，需账户签名）
     // since 取“上次同步到的中心时间”（服务端 server_time），客户端不再保存账本副本
     let since: i64 = w.info.synced_at;
-    acs_core::log::net(&format!("GET {server}/api/sync?since={since}"));
-    let resp = shared_agent().get(&format!("{server}/api/sync?since={since}"))
-        .timeout(std::time::Duration::from_secs(15))
-        .call()
-        .map_err(|e| anyhow!("连接中心失败：{e}"))?;
+    acs_core::log::net(&format!("GET {server}/api/sync?since={since} (signed)"));
+    let resp = signed_sync_get(w, since)?;
     let j: serde_json::Value = resp
         .into_json()
         .map_err(|e| anyhow!("响应解析失败：{e}"))?;
@@ -183,12 +218,8 @@ pub fn fetch_ledger(w: &Wallet) -> Result<Vec<serde_json::Value>> {
     if server.is_empty() {
         return Err(anyhow!("尚未配置中心服务器地址（请在设置中填写 server_url）"));
     }
-    acs_core::log::net(&format!("GET {server}/api/sync?since=0 (ledger)"));
-    let resp = shared_agent()
-        .get(&format!("{server}/api/sync?since=0"))
-        .timeout(std::time::Duration::from_secs(15))
-        .call()
-        .map_err(|e| anyhow!("连接中心失败：{e}"))?;
+    acs_core::log::net(&format!("GET {server}/api/sync?since=0 (signed ledger)"));
+    let resp = signed_sync_get(w, 0)?;
     let j: serde_json::Value = resp.into_json().map_err(|e| anyhow!("响应解析失败：{e}"))?;
     let mut out: Vec<(i64, serde_json::Value)> = Vec::new();
     if let Some(arr) = j

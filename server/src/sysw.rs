@@ -363,6 +363,9 @@ async fn sys_logout(
 pub struct ChangePassReq {
     pub old_password: String,
     pub new_password: String,
+    /// v4.0.0（#5）：任何场景改密码都要二次键入新密码。
+    #[serde(default)]
+    pub new_password_confirm: Option<String>,
 }
 
 /// 修改当前代管系统账本账户的**访问口令**（需已进入该账本）。
@@ -380,6 +383,11 @@ async fn sys_change_password(
     };
     if req.new_password.len() < 8 {
         return Err(ApiErr::bad_request("新口令至少 8 位"));
+    }
+    match req.new_password_confirm.as_deref() {
+        Some(c) if c == req.new_password => {}
+        Some(_) => return Err(ApiErr::bad_request("两次输入的新口令不一致")),
+        None => return Err(ApiErr::bad_request("请再次输入新口令以确认")),
     }
     if req.new_password == req.old_password {
         return Err(ApiErr::bad_request("新口令不能与原口令相同"));

@@ -7,50 +7,94 @@
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header>
-  <div class="topbar">
-    <div class="brand"><span class="logo">A€</span> AlphaCoin <span class="muted">服务中心面板</span></div>
-    <span class="sp"></span>
-    <span class="muted" id="panelAddr"></span>
-    <button class="btn btn-ghost" id="btnSettings">面板设置</button>
-    <button class="btn btn-ghost" id="btnImport">导入服务包</button>
-    <button class="btn btn-primary" id="btnCreate">新建服务</button>
-  </div>
-</header>
 
-<main>
-  <section class="hero">
-    <div><div class="k">服务数量</div><div class="v" id="statCount">–</div></div>
-    <div><div class="k">运行中</div><div class="v" id="statRunning">–</div></div>
-    <div><div class="k">面板端口</div><div class="v" id="statPanelPort">–</div></div>
-    <div><div class="k">服务根目录</div><div class="v small" id="statRoot">–</div></div>
-  </section>
-
-  <section class="panel">
-    <div class="panel-head">
-      <h2>中心服务</h2>
-      <span class="sp"></span>
-      <button class="btn btn-sm" id="btnRefresh">刷新</button>
+<!-- ==================== 登录 / 首次强制改密 ==================== -->
+<div class="auth-wrap" id="authView">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <span class="logo">A€</span>
+      <div><b>AlphaCoin 服务中心面板</b><div class="muted" style="font-size:12px">Service Console</div></div>
     </div>
-    <table>
-      <thead><tr>
-        <th>名称</th><th>域名</th><th>API 端口</th><th>管理端口</th><th>状态</th><th>操作</th>
-      </tr></thead>
-      <tbody id="svcBody"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
-    </table>
-  </section>
-</main>
+
+    <!-- 登录 -->
+    <div id="loginPane">
+      <div class="field"><label>用户名</label>
+        <input id="lUser" autocomplete="username" placeholder="root"></div>
+      <div class="field"><label>密码</label>
+        <input id="lPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+      <div class="field hidden" id="lTotpWrap"><label>动态验证码（已开启 TOTP）</label>
+        <input id="lTotp" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6 位数字"></div>
+      <div class="error" id="lErr"></div>
+      <button class="btn btn-primary btn-block" id="btnLogin">登录</button>
+      <button class="btn btn-block hidden" id="btnPasskey">🔑 使用 Passkey 一键登录</button>
+    </div>
+
+    <!-- 首次登录：强制修改用户名与密码 -->
+    <div id="changePane" class="hidden">
+      <div class="notice">首次登录必须<b>同时修改用户名与密码</b>；保存后初始密码立即失效。</div>
+      <div class="field"><label>新用户名（3–32 位，字母/数字/下划线/短横线/点）</label>
+        <input id="cUser" autocomplete="username"></div>
+      <div class="field"><label>新密码（≥8 位）</label>
+        <input id="cPass" type="password" autocomplete="new-password"></div>
+      <div class="field"><label>再次输入新密码</label>
+        <input id="cPass2" type="password" autocomplete="new-password"></div>
+      <div class="error" id="cErr"></div>
+      <button class="btn btn-primary btn-block" id="btnChange">保存并进入面板</button>
+      <button class="btn btn-ghost btn-block" id="btnChangeLogout">退出</button>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== 主界面 ==================== -->
+<div id="appView" class="hidden">
+  <header>
+    <div class="topbar">
+      <div class="brand"><span class="logo">A€</span> AlphaCoin <span class="muted">服务中心面板</span></div>
+      <span class="sp"></span>
+      <span class="panel-url" id="panelAddr" title="面板地址（设定的面板域名）"></span>
+      <button class="btn btn-ghost" id="btnSecurity">🛡️ 安全中心</button>
+      <button class="btn btn-ghost" id="btnSettings">面板设置</button>
+      <button class="btn btn-ghost" id="btnImport">导入服务包</button>
+      <button class="btn btn-primary" id="btnCreate">新建服务</button>
+      <button class="btn btn-ghost" id="btnLogout">退出</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div><div class="k">服务数量</div><div class="v" id="statCount">–</div></div>
+      <div><div class="k">运行中</div><div class="v" id="statRunning">–</div></div>
+      <div><div class="k">面板端口</div><div class="v" id="statPanelPort">–</div></div>
+      <div><div class="k">服务根目录</div><div class="v small" id="statRoot">–</div></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>中心服务</h2>
+        <span class="muted" style="font-size:12px">每个服务有两个域名：服务接口域名（API/唯一识别/文件夹名）与后台管理域名（网页入口）</span>
+        <span class="sp"></span>
+        <button class="btn btn-sm" id="btnRefresh">刷新</button>
+      </div>
+      <table>
+        <thead><tr>
+          <th>名称</th><th>服务接口域名</th><th>后台管理域名</th><th>API 端口</th><th>管理端口</th><th>状态</th><th>操作</th>
+        </tr></thead>
+        <tbody id="svcBody"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+</div>
 
 <!-- ============ 通用弹窗 ============ -->
 <div class="modal-wrap hidden" id="modalWrap">
-  <div class="modal">
+  <div class="modal" id="modalBox">
     <div class="modal-head"><h3 id="modalTitle"></h3><span class="sp"></span><button class="btn btn-ghost btn-sm" id="modalClose">✕</button></div>
     <div class="modal-body" id="modalBody"></div>
     <div class="modal-foot">
       <div class="error" id="modalError"></div>
       <span class="sp"></span>
-      <button class="btn" id="modalCancel">取消</button>
-      <button class="btn btn-primary" id="modalOk">确定</button>
+      <button class="btn hidden" id="modalCancel">取消</button>
+      <button class="btn btn-primary hidden" id="modalOk">确定</button>
     </div>
   </div>
 </div>

@@ -25,6 +25,13 @@ const MAX_LOGIN_FAILS: u32 = 5;
 const LOCK_BASE_SECS: i64 = 30;
 const LOCK_MAX_SECS: i64 = 300;
 
+/// 记录一次「按 IP 的登录失败」（F8：未知账号也计入，防在线爆破）。
+fn note_login_fail(st: &AppState, ip: &str, now: i64) {
+    let mut hits = state::admin_login_hits_lock(st);
+    let e = hits.entry(ip.to_string()).or_default();
+    e.push(now);
+}
+
 /// 记录一次管理员登录失败（**持久化**到 admins 表，重启不会清零）。
 /// 达到上限后指数退避锁定，封顶 `LOCK_MAX_SECS`。
 fn register_admin_fail(st: &AppState, id: i64, uid: &str, now: i64) {
@@ -105,9 +112,30 @@ pub struct LoginResp {
 
 pub async fn login(
     State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<LoginReq>,
 ) -> ApiResult<Json<LoginResp>> {
     let now = Utc::now().timestamp();
+    // F8：按来源 IP 限速（未知账号也能覆盖），10 次/60 秒，超限 429。
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    {
+        let mut hits = state::admin_login_hits_lock(&st);
+        let e = hits.entry(ip.clone()).or_default();
+        if e.prune(now, 60) >= 10 {
+            return Err(ApiErr::too_many_requests(
+                "登录尝试过于频繁，请 60 秒后重试",
+            ));
+        }
+        if hits.len() > 5000 {
+            hits.retain(|_, v| v.prune(now, 60) > 0);
+        }
+    }
     // 读账户行（锁只持有一瞬）：下面的 PBKDF2 校验在锁外做，
     // 否则单次登录会把全局库锁占住 0.2–0.5 秒，阻塞所有其他请求。
     // 失败计数/锁定时间取自数据库（持久化，重启不清零）。
@@ -133,6 +161,7 @@ pub async fn login(
     let Some((id, role, pw_hash, must_change, locked_until)) = row else {
         // 账号不存在 / 已停用：不回具体原因（防枚举），只记日志
         crate::log::err(format!("后台登录失败（账号不存在或已停用）：uid={}", req.uid));
+        note_login_fail(&st, &ip, now);
         return Err(ApiErr::unauthorized("账号或密码错误"));
     };
     if locked_until > now {
@@ -143,9 +172,11 @@ pub async fn login(
     }
     if !password::verify(&req.password, &pw_hash) {
         register_admin_fail(&st, id, &req.uid, now);
+        note_login_fail(&st, &ip, now);
         return Err(ApiErr::unauthorized("账号或密码错误"));
     }
-    // 登录成功：清零失败记录
+    // 登录成功：清零失败记录 + 该 IP 的失败计数
+    state::admin_login_hits_lock(&st).remove(&ip);
     let conn = state::db_lock(&st.db);
     let _ = conn.execute(
         "UPDATE admins SET fail_count=0, locked_until=0 WHERE id=?1",
@@ -220,6 +251,16 @@ pub async fn logout(
 }
 
 pub async fn me(auth: AuthUser, State(st): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    // v4.0.0（Server #10）：「我的」页展示自身信息，含上次登录时间
+    let (last_login, created_at) = {
+        let conn = state::db_lock(&st.db);
+        conn.query_row(
+            "SELECT last_login, created_at FROM admins WHERE id=?1",
+            params![auth.admin_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .unwrap_or((0, 0))
+    };
     Ok(Json(serde_json::json!({
         "id": auth.admin_id,
         "uid": auth.username,
@@ -227,6 +268,8 @@ pub async fn me(auth: AuthUser, State(st): State<AppState>) -> ApiResult<Json<se
         "must_change_password": auth.must_change_password,
         // v3.3.0（D15）：主密钥是否已解锁（未解锁时系统账本相关操作不可用）
         "master_key_unlocked": state::master_lock(&st).is_some(),
+        "last_login": last_login,
+        "created_at": created_at,
     })))
 }
 
@@ -330,6 +373,9 @@ impl FromRequestParts<AppState> for AuthUser {
 pub struct ChangePwdReq {
     pub old_password: Option<String>,
     pub new_password: String,
+    /// v4.0.0（#5）：**任何场景改密码都要二次键入新密码**，服务端强制校验一致。
+    #[serde(default)]
+    pub new_password_confirm: Option<String>,
     pub target_uid: Option<String>, // root 修改他人时填写
 }
 
@@ -347,6 +393,12 @@ pub async fn change_password(
 ) -> ApiResult<Json<serde_json::Value>> {
     if req.new_password.len() < 8 {
         return Err(ApiErr::bad_request("新密码至少 8 位"));
+    }
+    // v4.0.0（#5）：必须二次键入新密码并保持一致
+    match req.new_password_confirm.as_deref() {
+        Some(c) if c == req.new_password => {}
+        Some(_) => return Err(ApiErr::bad_request("两次输入的新密码不一致")),
+        None => return Err(ApiErr::bad_request("请再次输入新密码以确认")),
     }
     let conn = state::db_lock(&st.db);
 

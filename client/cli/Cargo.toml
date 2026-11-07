@@ -1,8 +1,8 @@
 [package]
 name = "AlphaCoinClientCli"
-version = "3.3.0"
+version = "4.0.0"
 edition = "2024"
-description = "A€ 客户端 CLI（运维/自动化工具；GUI 见 client/qt 的 AlphaWallet / AlphaBankmanage）"
+description = "A€ 客户端 CLI（运维/自动化工具；GUI 见 client/qt 的 AlphaWallet / AlphaCompanyWallet）"
 license = "MIT"
 
 [[bin]]

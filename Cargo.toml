@@ -5,3 +5,16 @@ members = ["core", "server", "panel", "client/core", "client/cli"]
 [profile.release]
 lto = true
 strip = true
+
+# dev 构建也优化口令哈希相关实现：PBKDF2 的瓶颈是 sha2 + acs-core 内循环。
+# 只影响 debug 二进制（安全强度不变），避免「debug 下单次登录约 6s」造成的
+# 可用性放大（F3）。release 构建本身已是 opt-level=3。
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.sha1]
+opt-level = 3
+
+[profile.dev.package.acs-core]
+opt-level = 2
+

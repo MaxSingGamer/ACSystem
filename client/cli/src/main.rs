@@ -1,22 +1,21 @@
-//! acs-client：A€（Alpha Coin）钱包客户端（Tauri 桌面应用）。
+//! AlphaCoinClientCli：A€（Alpha Coin）命令行客户端（运维 / 自动化）。
 //!
-//! - 默认启动 Tauri WebView 窗口（v3.0.0 弃用 axum 本地 Web 服务）
-//! - 非交互子命令：`status` / `sync` / `new` / `open` / `send` / `submit` / `confirm`（便于脚本与测试）
-
-// release 以 Windows GUI 子系统链接：双击启动时系统根本不会分配黑色控制台窗口。
-// （CLI 子命令 / --debug 等带参数从终端启动时，见 attach_cli_console() 附加父控制台。）
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! 图形界面客户端为 `client/qt` 的 AlphaWallet / AlphaCompanyWallet（QT 6），
+//! 本程序只提供非交互子命令：`status` / `sync` / `new` / `open` / `send` / `submit` / `confirm` / `config` / `repair`。
+//! **不随 Release 发布**，仅本地构建用于运维与端到端测试。
+//!
+//! 注：v3.3.0 起已删除 Tauri 薄壳，CLI 为普通控制台程序。
 
 use std::io;
 
 use anyhow::{anyhow, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use acs_client_core::{client_api, sync, txn, wallet};
 use acs_client_core::wallet::Wallet;
 
 #[derive(Parser)]
-#[command(name = "acs-client", version, about = "A€（Alpha Coin）钱包客户端 —— Tauri / CLI")]
+#[command(name = "AlphaCoinClientCli", version, about = "A€（Alpha Coin）命令行客户端（GUI 见 AlphaWallet / AlphaCompanyWallet）")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -26,8 +25,11 @@ struct Cli {
 enum Cmd {
     /// 打印钱包状态
     Status,
-    /// 从中心镜像拉取一次并打印结果
-    Sync,
+    /// 从中心拉取一次并打印结果（v4.0.0：同步需账户签名，必须提供钱包口令）
+    Sync {
+        #[arg(long, help = "钱包口令（用于对同步请求签名）")]
+        pass: String,
+    },
     /// 创建钱包（首次使用）。全部参数可选；缺省时交互输入。
     New {
         #[arg(long)]
@@ -87,21 +89,10 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    // release 为 GUI 子系统（默认无控制台）。凡带参数启动（子命令 / --debug / --help 等）
-    // 视为从终端调用，先附加父进程控制台，保证 clap 帮助与 println 输出可见。
-    #[cfg(all(target_os = "windows", not(debug_assertions)))]
-    if std::env::args_os().count() > 1 {
-        attach_cli_console();
-    }
-
-    // --debug 为“透传标记”，在交给 clap 前先过滤掉，避免被当作未知参数。
-    #[cfg(target_os = "windows")]
-    let debug = std::env::args().any(|a| a == "--debug");
-    let args: Vec<String> = std::env::args().filter(|a| a != "--debug").collect();
-    let cli = Cli::parse_from(args);
+    let cli = Cli::parse();
     match cli.cmd {
         Some(Cmd::Status) => cmd_status(),
-        Some(Cmd::Sync) => cmd_sync(),
+        Some(Cmd::Sync { pass }) => cmd_sync(&pass),
         Some(Cmd::New { uid, email, pass, server, apikey, typ }) => {
             cmd_new(uid, email, pass, server, apikey, typ)
         }
@@ -112,88 +103,12 @@ fn main() -> Result<()> {
         Some(Cmd::Config { server, apikey }) => cmd_config(server.as_deref(), apikey.as_deref()),
         Some(Cmd::Repair { dedup_keys }) => cmd_repair(dedup_keys),
         None => {
-            // 除非以 --debug 启动，否则隐藏黑色后端控制台窗口（仅写 .alphalog）。
-            #[cfg(target_os = "windows")]
-            if !debug {
-                hide_console();
-            }
-            run_tauri()
+            // 无子命令：打印帮助（图形界面请用 AlphaWallet / AlphaCompanyWallet）
+            Cli::command().print_help()?;
+            println!();
+            Ok(())
         }
     }
-}
-
-/// 隐藏控制台窗口（Windows）。GUI 启动时调用，避免闪现黑色后端窗口。
-/// （release 已以 GUI 子系统编译、系统不分配控制台，此函数主要兜底 debug 构建与从已有控制台启动的情形。）
-#[cfg(target_os = "windows")]
-fn hide_console() {
-    use std::os::raw::c_void;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetConsoleWindow() -> *mut c_void;
-    }
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn ShowWindow(hWnd: *mut c_void, nCmdShow: i32) -> i32;
-    }
-    unsafe {
-        let hwnd = GetConsoleWindow();
-        if !hwnd.is_null() {
-            ShowWindow(hwnd, 0); // SW_HIDE
-        }
-    }
-}
-
-/// （release 专用）GUI 子系统进程默认无控制台。带参数从终端启动时，
-/// 附加到父进程控制台并重定向标准句柄，使 CLI / --debug 的 println 输出可见。
-#[cfg(all(target_os = "windows", not(debug_assertions)))]
-fn attach_cli_console() {
-    use std::os::windows::io::AsRawHandle;
-    use std::os::raw::c_void;
-    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
-    const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6; // -10
-    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5; // -11
-    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // -12
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn AttachConsole(dwProcessId: u32) -> i32;
-        fn GetConsoleWindow() -> *mut c_void;
-        fn SetStdHandle(nStdHandle: u32, hHandle: *mut c_void) -> i32;
-    }
-    unsafe {
-        if !GetConsoleWindow().is_null() {
-            return; // 已有控制台，无需附加
-        }
-        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
-            return; // 无父控制台（非终端启动），保持无窗口
-        }
-        // 打开并绑定 CONOUT$/CONIN$。句柄需长驻，故泄漏（进程生命周期内有效）。
-        // 说明：Rust 标准输出在首次 println 时才取句柄，先 SetStdHandle 即可生效。
-        let out = std::fs::OpenOptions::new().write(true).open("CONOUT$").ok();
-        let err = std::fs::OpenOptions::new().write(true).open("CONOUT$").ok();
-        let inn = std::fs::OpenOptions::new().read(true).open("CONIN$").ok();
-        if let Some(f) = out {
-            let h = f.as_raw_handle();
-            SetStdHandle(STD_OUTPUT_HANDLE, h);
-            std::mem::forget(f);
-        }
-        if let Some(f) = err {
-            let h = f.as_raw_handle();
-            SetStdHandle(STD_ERROR_HANDLE, h);
-            std::mem::forget(f);
-        }
-        if let Some(f) = inn {
-            let h = f.as_raw_handle();
-            SetStdHandle(STD_INPUT_HANDLE, h);
-            std::mem::forget(f);
-        }
-    }
-}
-
-/// 启动图形界面：v3.3.0 起 GUI 已迁到 `client/qt`（AlphaWallet / AlphaBankmanage），
-/// CLI 不再内嵌 Tauri 应用；这里只给出提示并返回。
-fn run_tauri() -> Result<()> {
-    eprintln!("图形客户端请使用 AlphaWallet / AlphaBankmanage（见安装包或 client/qt）。");
-    Ok(())
 }
 
 // ---------------- 非交互子命令 ----------------
@@ -206,7 +121,7 @@ fn wallet_ready() -> Result<Wallet> {
     let w = Wallet::open()?;
     if !w.info.initialized() {
         return Err(anyhow!(
-            "钱包尚未初始化：先运行 `acs-client new --uid <UID> --email <邮箱> --pass <口令>` 创建钱包"
+            "钱包尚未初始化：先运行 `AlphaCoinClientCli new --uid <UID> --email <邮箱> --pass <口令>` 创建钱包"
         ));
     }
     Ok(w)
@@ -215,7 +130,7 @@ fn wallet_ready() -> Result<Wallet> {
 fn cmd_status() -> Result<()> {
     let w = Wallet::open()?;
     if !w.info.initialized() {
-        println!("钱包尚未初始化。运行 `acs-client` 进入引导，或 `acs-client new --uid <UID> --email <邮箱> --pass <口令>` 创建。");
+        println!("钱包尚未初始化。运行 `AlphaCoinClientCli` 进入引导，或 `AlphaCoinClientCli new --uid <UID> --email <邮箱> --pass <口令>` 创建。");
         return Ok(());
     }
     println!("Alpha Wallet");
@@ -230,10 +145,12 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-fn cmd_sync() -> Result<()> {
+fn cmd_sync(pass: &str) -> Result<()> {
     // 未初始化时按失败返回：否则“什么都没同步”会被自动化当成成功。
     // （`status` 是纯查询，仍允许在未初始化状态下打印状态。）
     let mut w = wallet_ready()?;
+    // v4.0.0（F4）：/api/sync 需要账户签名；本进程内缓存口令用于签名（仅内存）。
+    w.set_session_passphrase(pass);
     let r = sync::pull(&w)?;
     if r.accounts == 0 {
         return Err(anyhow!("中心未返回账户快照，本次同步未生效（同步水位未推进）"));
@@ -321,7 +238,7 @@ fn cmd_new(
     let _ = w.save_local_account(&uid, atype, &email, &gk.pubkey, &gk.encrypted_seckey);
     println!("钱包创建完成：{uid} · {}", atype.as_str());
     println!("数据目录：{}", wallet::data_dir_str().display());
-    println!("运行 `acs-client` 进入界面，或 `acs-client sync` 同步账本。");
+    println!("运行 `AlphaCoinClientCli` 进入界面，或 `AlphaCoinClientCli sync` 同步账本。");
     Ok(())
 }
 
@@ -373,7 +290,7 @@ fn cmd_config(server: Option<&str>, apikey: Option<&str>) -> Result<()> {
             Some(c) => println!("服务端配置: {}", serde_json::to_string_pretty(&c)?),
             None => println!("服务端配置: （无缓存；设置中心地址或登录后自动拉取）"),
         }
-        println!("用法：acs-client config --server <地址> [--apikey <key>]");
+        println!("用法：AlphaCoinClientCli config --server <地址> [--apikey <key>]");
     }
     Ok(())
 }

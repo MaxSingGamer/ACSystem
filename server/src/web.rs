@@ -35,6 +35,28 @@ fn static_dir() -> String {
     concat!(env!("CARGO_MANIFEST_DIR"), "/static").to_string()
 }
 
+/// 服务接口域名（公开端口）根路径：重定向到「后台管理域名」的登录页。
+///
+/// v4.0.0（Panel #3）：一个服务有两个域名——
+/// ① 服务接口域名（API，唯一识别符，同时决定服务文件夹名）；
+/// ② 后台管理域名（网页，仅用于把人带到后台登录页）。
+/// 因此访问 API 域名根路径时不再返回 404，而是跳到后台登录入口。
+pub async fn redirect_to_admin() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let target = std::env::var("ACS_ADMIN_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    match target {
+        Some(base) => Redirect::to(&format!("{base}/login")).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            "服务接口域名不提供网页入口。请通过后台管理域名（ACS_ADMIN_URL）访问管理后台。",
+        )
+            .into_response(),
+    }
+}
+
 async fn index() -> Redirect {
     Redirect::to("/login")
 }

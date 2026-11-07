@@ -69,7 +69,7 @@ impl CoreConfig {
 //                  └─ <服务域名>/              （该服务的 .env、db、gnupg、logs/）
 //  客户端钱包： ~/.alphawallet/                （central_server_history.db —— 所有中心的历史）
 //                  └─ <中心域名>/              （该中心的 wallet.db、gnupg、logs/）
-//  企业客户端： ~/.alphabankmanage/             （结构与钱包相同）
+//  企业客户端： ~/.alphacompanywallet/             （结构与钱包相同）
 //
 //  三个根目录名 **固定不可改名**（D33）；仅测试/并行验证可用 `ACS_HOME_BASE` 改变 home 基准。
 // ============================================================================
@@ -106,9 +106,9 @@ pub fn wallet_root() -> PathBuf {
     home_base().join(".alphawallet")
 }
 
-/// 企业管理客户端根目录（固定 `~/.alphabankmanage`）。
-pub fn bankmanage_root() -> PathBuf {
-    home_base().join(".alphabankmanage")
+/// 企业管理客户端根目录（固定 `~/.alphacompanywallet`）。
+pub fn companywallet_root() -> PathBuf {
+    home_base().join(".alphacompanywallet")
 }
 
 /// 客户端「某中心」的目录：`<root>/<domain_key>`。

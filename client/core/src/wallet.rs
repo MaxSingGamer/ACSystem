@@ -6,13 +6,51 @@
 //! `mirror_accounts`（镜像账户快照）与 `outbox`（本地签名待提交）。
 //! 注：账号相关（uid / 公钥 / 加密私钥）**只存 local_accounts 一张表**，不含任何账目数据。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection};
 
 use acs_core::gpg::GpgUtil;
 use acs_core::models::{AccountType, GeneratedKey};
+
+/// 进程内「当前会话钱包口令」缓存：仅内存、不落盘、退出即清（v4.0.0 F4）。
+///
+/// 为什么需要：C ABI 每次 `acs_call` 都会临时 `Wallet::open()`（新实例），
+/// 若口令只存在 `Wallet.passphrase` 字段里，登录后下一次调用同步时就拿不到了。
+/// 同步接口现在要求账户签名，因此把口令缓存在进程级（同一 DLL 进程内），
+/// 语义仍是「本次会话有效」：`logout`/进程退出即清除。
+static SESSION_PASS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn session_pass_map() -> &'static Mutex<HashMap<String, String>> {
+    SESSION_PASS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 记录某账户的会话口令（仅内存）。
+pub fn session_set_passphrase(uid: &str, pass: &str) {
+    if uid.trim().is_empty() || pass.is_empty() {
+        return;
+    }
+    if let Ok(mut m) = session_pass_map().lock() {
+        m.insert(uid.to_string(), pass.to_string());
+    }
+}
+
+/// 清除某账户的会话口令。
+pub fn session_clear_passphrase(uid: &str) {
+    if let Ok(mut m) = session_pass_map().lock() {
+        m.remove(uid);
+    }
+}
+
+fn session_get_passphrase(uid: &str) -> Option<String> {
+    session_pass_map()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(uid).cloned())
+}
 
 /// client 专用附加表。
 pub const CLIENT_SCHEMA: &str = r#"
@@ -423,24 +461,30 @@ impl Wallet {
     /// 记录本次会话的钱包口令（仅内存；登录/转账/确认成功后调用）。
     pub fn set_session_passphrase(&mut self, pass: &str) {
         self.passphrase = Some(pass.to_string());
+        session_set_passphrase(&self.info.uid, pass);
     }
 
     /// 清除会话口令（退出登录 / 应用退出 / 注销账户）。
     pub fn clear_session_passphrase(&mut self) {
         self.passphrase = None;
+        session_clear_passphrase(&self.info.uid);
     }
 
-    /// 用账户私钥签名（用于只读查询的持有性证明）。口令来源优先级：
-    /// ① 本次会话缓存 → ② 调用方显式提供 → ③ 未加密密钥直接签（历史遗留密钥）。
-    /// 全部不可用时报错，由调用方决定是否要求用户输入口令。
+    /// 用账户私钥签名（用于只读查询的持有性证明）。
+    /// 口令来源优先级：① 本次会话缓存 → ② 调用方显式提供 → ③ 进程级会话缓存 → ④ 未加密密钥直接签。
     pub fn sign_with(&self, data: &[u8], explicit: Option<&str>) -> Result<String> {
         let fp = self
             .fingerprint(&self.info.uid)
             .ok_or_else(|| anyhow!("未找到钱包密钥（指纹），请重新登录以导入密钥"))?;
-        if let Some(pass) = self.passphrase.as_deref().or(explicit) {
+        let pass = self
+            .passphrase
+            .clone()
+            .or_else(|| explicit.map(|s| s.to_string()))
+            .or_else(|| session_get_passphrase(&self.info.uid));
+        if let Some(pass) = pass {
             return self
                 .gpg
-                .sign_detached(&fp, pass, data)
+                .sign_detached(&fp, &pass, data)
                 .map_err(|e| anyhow!("签名失败（会话口令可能已失效，请重新登录）：{e}"));
         }
         self.gpg

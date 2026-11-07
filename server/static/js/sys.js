@@ -159,7 +159,7 @@ function bindPassword() {
     msg.textContent = '提交中…';
     try {
       const r = await api('/api/admin/sys/change-password', {
-        method: 'POST', body: JSON.stringify({ old_password: oldP, new_password: newP })
+        method: 'POST', body: JSON.stringify({ old_password: oldP, new_password: newP, new_password_confirm: new2 })
       });
       msg.textContent = r.message || '已修改';
       // 改密后刷新状态，must_change_password 应变为 false

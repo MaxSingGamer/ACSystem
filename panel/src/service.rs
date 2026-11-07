@@ -1,4 +1,4 @@
-//! 服务实例管理（v3.3.0 #13）：新建 / 启停 / 改域名端口 / 删除 / 日志查看。
+//! 服务实例管理（v4.0.0）：新建 / 启停 / 改域名端口 / 删除 / 日志查看。
 //!
 //! 与其他模块的分工：
 //! - `registry`：注册表与冲突校验（`servers.json`）
@@ -7,7 +7,10 @@
 //! 关键约束：
 //! - 服务端进程与面板**不同 exe**（D38）：面板只负责 spawn `AlphaCoinServer`，自身重启不影响服务；
 //! - 服务端口**没有默认值**（D25），必须显式给出；
-//! - 新建后**只可改域名与端口**；改域名要同步「目录名 + 注册表 + .env」。
+//! - **域名拆成「服务接口域名」与「后台管理域名」**（v4.0.0 Panel #3）；
+//! - 改「服务接口域名」会同步改文件夹名 → **必须先停止服务**（释放文件夹占用），改完自动重启
+//!   （v4.0.0 Panel #2）；
+//! - 日志文件名由 **Server 自己**决定并写入（面板以 `-logfile` 传入），不再有 `panel-spawn.log`。
 
 use std::fs;
 use std::net::{SocketAddr, TcpStream};
@@ -24,7 +27,12 @@ use crate::registry::{self, ServiceRec, NO_EDIT_HINT};
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewServiceReq {
     pub name: String,
-    pub domain: String,
+    /// 服务接口域名（API，唯一识别符，决定文件夹名）
+    #[serde(alias = "domain")]
+    pub api_domain: String,
+    /// 后台管理域名（网页，重定向到后台登录页）
+    #[serde(default)]
+    pub admin_domain: String,
     pub api_port: u16,
     pub admin_port: u16,
     /// `uid:密码` 列表（至少一个，首启后不可增减）
@@ -41,16 +49,18 @@ pub struct NewServiceReq {
     pub brand_currency: String,
 }
 
-/// 可修改项（第 7 条：新建/导入后**只允许改域名与端口**）。
+/// 可修改项（新建/导入后**只允许改域名与端口**）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateServiceReq {
-    pub domain: String,
+    #[serde(alias = "domain")]
+    pub api_domain: String,
+    #[serde(default)]
+    pub admin_domain: String,
     pub api_port: u16,
     pub admin_port: u16,
 }
 
 pub fn server_exe() -> PathBuf {
-    // v3.3.0 #1：服务端产物名 AlphaCoinServer（旧名 acs-server 仅作兼容回退）
     let candidates: [&str; 2] = if cfg!(windows) {
         ["AlphaCoinServer.exe", "acs-server.exe"]
     } else {
@@ -104,15 +114,26 @@ pub fn service_state(rec: &ServiceRec) -> (String, Option<u32>) {
     ("stopped".into(), rec.pid)
 }
 
+pub fn is_running(rec: &ServiceRec) -> bool {
+    matches!(service_state(rec).0.as_str(), "running" | "starting")
+}
+
 /// 新建服务：校验 → 建目录 → 写 `.env` → 写注册表。
 pub fn create_service(req: NewServiceReq) -> Result<ServiceRec> {
     let mut reg = registry::load_registry()?;
+    let api_domain = req.api_domain.trim().to_string();
+    let admin_domain = if req.admin_domain.trim().is_empty() {
+        registry::default_admin_domain(&api_domain)
+    } else {
+        req.admin_domain.trim().to_string()
+    };
     let rec = ServiceRec {
         name: req.name.trim().to_string(),
-        domain: req.domain.trim().to_string(),
+        api_domain: api_domain.clone(),
+        admin_domain,
         api_port: req.api_port,
         admin_port: req.admin_port,
-        dir: req.domain.trim().to_string(),
+        dir: api_domain,
         created_at: chrono::Utc::now().timestamp(),
         pid: None,
     };
@@ -140,7 +161,7 @@ pub fn create_service(req: NewServiceReq) -> Result<ServiceRec> {
     }
     let dir = registry::server_root().join(&rec.dir);
     if dir.exists() {
-        bail!("目录已存在：{}（请换域名，或先删除该目录）", dir.display());
+        bail!("目录已存在：{}（请换服务接口域名，或先删除该目录）", dir.display());
     }
     fs::create_dir_all(dir.join("logs")).with_context(|| format!("创建目录失败：{}", dir.display()))?;
     write_service_env(&dir, &rec, &req)?;
@@ -166,9 +187,11 @@ fn write_service_env(dir: &Path, rec: &ServiceRec, req: &NewServiceReq) -> Resul
     let mut s = String::new();
     s.push_str(&format!("# {NO_EDIT_HINT}\n"));
     s.push_str("# 中心服务配置（面板自动维护；仅域名/端口可在面板内修改）\n");
-    s.push_str(&format!("ACS_PUBLIC_URL=https://{}\n", rec.domain));
+    // v4.0.0：服务接口域名（API）与后台管理域名分开
+    s.push_str(&format!("ACS_PUBLIC_URL=https://{}\n", rec.api_domain));
     s.push_str(&format!("ACS_PUBLIC_PORT={}\n", rec.api_port));
     s.push_str("ACS_PUBLIC_BIND=0.0.0.0\n");
+    s.push_str(&format!("ACS_ADMIN_URL=https://{}\n", rec.admin_domain));
     s.push_str(&format!("ACS_ADMIN_PORT={}\n", rec.admin_port));
     s.push_str("ACS_ADMIN_BIND=0.0.0.0\n");
     s.push_str(&format!("ACS_ROOT_ACCOUNTS={roots}\n"));
@@ -180,6 +203,55 @@ fn write_service_env(dir: &Path, rec: &ServiceRec, req: &NewServiceReq) -> Resul
     s.push_str(&format!("ACS_BRAND_CURRENCY={currency}\n"));
     fs::write(dir.join(".env"), s).with_context(|| format!("写入 {}/.env 失败", dir.display()))?;
     Ok(())
+}
+
+/// 修改 `.env` 中的若干键值（保留注释、顺序与未知键；缺失的键追加到末尾）。
+pub fn set_env_keys(path: &Path, updates: &[(&str, String)]) -> Result<()> {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let mut out = String::new();
+    let mut done: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let mut replaced = false;
+        if !trimmed.starts_with('#') {
+            if let Some((k, _)) = trimmed.split_once('=') {
+                let k = k.trim();
+                if let Some((_, v)) = updates.iter().find(|(name, _)| *name == k) {
+                    out.push_str(&format!("{k}={v}\n"));
+                    done.push(k);
+                    replaced = true;
+                }
+            }
+        }
+        if !replaced {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    for (k, v) in updates {
+        if !done.contains(k) {
+            out.push_str(&format!("{k}={v}\n"));
+        }
+    }
+    fs::write(path, out).with_context(|| format!("写入 {} 失败", path.display()))?;
+    Ok(())
+}
+
+/// 生成一个尚不存在的日志文件名（`YYMMDD-HH_mm_SS.alphalog`，同秒冲突时加序号）。
+pub fn new_log_path(logs_dir: &Path) -> PathBuf {
+    let base = acs_core::log::log_file_name();
+    let mut p = logs_dir.join(&base);
+    if !p.exists() {
+        return p;
+    }
+    let stem = base.trim_end_matches(".alphalog").to_string();
+    for n in 2..1000 {
+        p = logs_dir.join(format!("{stem}-{n}.alphalog"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    logs_dir.join(base)
 }
 
 /// 启动服务（已在运行则直接返回）。
@@ -198,21 +270,22 @@ pub fn start_service(name: &str) -> Result<u32> {
     if !dir.join(".env").exists() {
         bail!("服务配置缺失：{}/.env", dir.display());
     }
-    fs::create_dir_all(dir.join("logs"))?;
-    let out = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("logs").join("panel-spawn.log"))?;
-    let err = out.try_clone()?;
+    let logs_dir = dir.join("logs");
+    fs::create_dir_all(&logs_dir)?;
+    // v4.0.0 #7：日志只由 Server 自己写；面板把**确切文件名**通过 -logfile 传入，
+    // 不再把子进程 stdout/stderr 重定向成 panel-spawn.log。
+    let logfile = new_log_path(&logs_dir);
     let mut cmd = Command::new(server_exe());
     cmd.arg("-homedir")
         .arg(&dir)
         // 服务名称通过启动参数传入（D26：服务名不出现在 .env / 服务包里）
         .arg("-name")
         .arg(&rec.name)
+        .arg("-logfile")
+        .arg(&logfile)
         .current_dir(&dir)
-        .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .stdin(Stdio::null());
     #[cfg(windows)]
     {
@@ -250,6 +323,13 @@ pub fn stop_service(name: &str) -> Result<()> {
                 break;
             }
         }
+    }
+    // 等端口真正释放（Windows 上进程退出后句柄/监听可能延迟几十毫秒）
+    for _ in 0..40 {
+        if !port_open(rec.api_port) && !port_open(rec.admin_port) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     reg.servers[idx].pid = None;
     registry::save_registry(&reg)?;
@@ -313,8 +393,12 @@ fn pid_by_port(port: u16) -> Option<u32> {
 
 /// 修改服务域名 / 端口（唯一允许的修改项）。
 ///
-/// 改域名时同步三处：① 目录名 ② `servers.json` ③ 该服务 `.env` 的 URL/端口。
-pub fn update_service(name: &str, req: UpdateServiceReq) -> Result<ServiceRec> {
+/// v4.0.0 Panel #2/#3：
+/// - 改**服务接口域名** → 先停止服务（释放文件夹占用）→ 重命名目录 → 改 `.env` → 注册表 → 自动重启；
+/// - 改后台管理域名 / 端口同样需要重启服务才生效，所以只要原本在运行，改动后自动重启。
+///
+/// 返回 `(最新记录, 是否已自动重启)`。
+pub fn update_service(name: &str, req: UpdateServiceReq) -> Result<(ServiceRec, bool)> {
     let mut reg = registry::load_registry()?;
     let idx = reg
         .servers
@@ -322,47 +406,124 @@ pub fn update_service(name: &str, req: UpdateServiceReq) -> Result<ServiceRec> {
         .position(|s| s.name == name)
         .ok_or_else(|| anyhow::anyhow!("服务不存在：{name}"))?;
     let old = reg.servers[idx].clone();
-    let new_domain = req.domain.trim().to_string();
+    let api_domain = req.api_domain.trim().to_string();
+    let admin_domain = if req.admin_domain.trim().is_empty() {
+        registry::default_admin_domain(&api_domain)
+    } else {
+        req.admin_domain.trim().to_string()
+    };
     let cand = ServiceRec {
         name: old.name.clone(),
-        domain: new_domain.clone(),
+        api_domain: api_domain.clone(),
+        admin_domain,
         api_port: req.api_port,
         admin_port: req.admin_port,
-        dir: new_domain.clone(),
+        dir: api_domain.clone(),
         created_at: old.created_at,
         pid: old.pid,
     };
     registry::validate_no_conflict(&reg, &cand, Some(&old.name))?;
-    let old_dir = registry::server_root().join(&old.dir);
-    let new_dir = registry::server_root().join(&cand.dir);
+    let root = registry::server_root();
+    let old_dir = root.join(&old.dir);
+    let new_dir = root.join(&cand.dir);
+    if new_dir != old_dir && new_dir.exists() {
+        bail!("目标目录已存在：{}", new_dir.display());
+    }
+    let was_running = is_running(&old);
+    if was_running {
+        stop_service(name)?;
+    }
+    // 改「服务接口域名」= 改文件夹名
     if new_dir != old_dir {
-        if new_dir.exists() {
-            bail!("目标目录已存在：{}", new_dir.display());
-        }
-        fs::rename(&old_dir, &new_dir)
-            .with_context(|| format!("重命名目录失败：{} -> {}", old_dir.display(), new_dir.display()))?;
-    }
-    // 同步 .env（只改 URL / 端口；其余键原样保留，未知键也不丢）
-    let env_path = new_dir.join(".env");
-    let text = fs::read_to_string(&env_path).unwrap_or_default();
-    let mut out = String::new();
-    for line in text.lines() {
-        let line2 = line.trim();
-        if line2.starts_with("ACS_PUBLIC_URL=") {
-            out.push_str(&format!("ACS_PUBLIC_URL=https://{new_domain}\n"));
-        } else if line2.starts_with("ACS_PUBLIC_PORT=") {
-            out.push_str(&format!("ACS_PUBLIC_PORT={}\n", cand.api_port));
-        } else if line2.starts_with("ACS_ADMIN_PORT=") {
-            out.push_str(&format!("ACS_ADMIN_PORT={}\n", cand.admin_port));
+        if old_dir.exists() {
+            fs::rename(&old_dir, &new_dir)
+                .with_context(|| format!("重命名目录失败：{} -> {}", old_dir.display(), new_dir.display()))?;
         } else {
-            out.push_str(line);
-            out.push('\n');
+            fs::create_dir_all(&new_dir)?;
         }
     }
-    fs::write(&env_path, out).with_context(|| format!("写入 {} 失败", env_path.display()))?;
+    // 同步 .env（域名/端口；其余键原样保留）
+    let env_path = new_dir.join(".env");
+    set_env_keys(
+        &env_path,
+        &[
+            ("ACS_PUBLIC_URL", format!("https://{api_domain}")),
+            ("ACS_PUBLIC_PORT", cand.api_port.to_string()),
+            ("ACS_ADMIN_URL", format!("https://{}", cand.admin_domain)),
+            ("ACS_ADMIN_PORT", cand.admin_port.to_string()),
+        ],
+    )?;
     reg.servers[idx] = cand.clone();
     registry::save_registry(&reg)?;
-    Ok(cand)
+    if was_running {
+        start_service(name)?;
+    }
+    Ok((cand, was_running))
+}
+
+/// v4.0.0 Panel #4：文件夹名与服务接口域名不一致时，由用户选择以哪一个为准。
+///
+/// - `choice = "domain"`：用服务接口域名 → **重命名文件夹**为域名；
+/// - `choice = "dir"`：用文件夹名 → **把服务接口域名改为文件夹名**（同步 `.env`）。
+pub fn resolve_dir_mismatch(name: &str, choice: &str) -> Result<ServiceRec> {
+    let mut reg = registry::load_registry()?;
+    let idx = reg
+        .servers
+        .iter()
+        .position(|s| s.name == name)
+        .ok_or_else(|| anyhow::anyhow!("服务不存在：{name}"))?;
+    let old = reg.servers[idx].clone();
+    if !old.dir_mismatch() {
+        bail!("该服务的文件夹名与服务接口域名一致，无需选择");
+    }
+    let was_running = is_running(&old);
+    if was_running {
+        stop_service(name)?;
+    }
+    let root = registry::server_root();
+    let result = match choice {
+        "domain" => {
+            let target = root.join(&old.api_domain);
+            if target.exists() && target != root.join(&old.dir) {
+                bail!("目标目录已存在：{}", target.display());
+            }
+            let old_dir = root.join(&old.dir);
+            if old_dir.exists() {
+                fs::rename(&old_dir, &target)
+                    .with_context(|| format!("重命名目录失败：{} -> {}", old_dir.display(), target.display()))?;
+            }
+            let mut rec = old.clone();
+            rec.dir = old.api_domain.clone();
+            registry::validate_no_conflict(&reg, &rec, Some(&old.name))?;
+            reg.servers[idx] = rec.clone();
+            registry::save_registry(&reg)?;
+            rec
+        }
+        "dir" => {
+            let mut rec = old.clone();
+            rec.api_domain = old.dir.clone();
+            if rec.admin_domain.trim().is_empty() || rec.admin_domain == registry::default_admin_domain(&old.api_domain) {
+                rec.admin_domain = registry::default_admin_domain(&rec.api_domain);
+            }
+            registry::validate_no_conflict(&reg, &rec, Some(&old.name))?;
+            let env_path = root.join(&rec.dir).join(".env");
+            set_env_keys(
+                &env_path,
+                &[
+                    ("ACS_PUBLIC_URL", format!("https://{}", rec.api_domain)),
+                    ("ACS_ADMIN_URL", format!("https://{}", rec.admin_domain)),
+                ],
+            )?;
+            reg.servers[idx] = rec.clone();
+            registry::save_registry(&reg)?;
+            rec
+        }
+        other => bail!("非法选择：{other}（应为 domain 或 dir）"),
+    };
+    if was_running {
+        start_service(name)?;
+    }
+    Ok(result)
 }
 
 /// 删除服务：先停进程，再删目录与注册表项。
@@ -400,7 +561,8 @@ pub fn list_logs(rec: &ServiceRec) -> Result<Vec<LogFile>> {
     let Ok(rd) = fs::read_dir(&dir) else { return Ok(out) };
     for e in rd.flatten() {
         let p = e.path();
-        if p.extension().and_then(|x| x.to_str()) != Some("log") {
+        // v4.0.0 #7：只有 Server 写的 `*.alphalog`
+        if p.extension().and_then(|x| x.to_str()) != Some("alphalog") {
             continue;
         }
         let md = e.metadata().ok();
@@ -414,7 +576,7 @@ pub fn list_logs(rec: &ServiceRec) -> Result<Vec<LogFile>> {
                 .unwrap_or(0),
         });
     }
-    // 新的在前（文件名以毫秒时间戳开头）
+    // 新的在前（文件名以 YYMMDD-HH_mm_SS 开头，按名倒序即按时间倒序）
     out.sort_by(|a, b| b.file.cmp(&a.file));
     Ok(out)
 }
@@ -445,6 +607,19 @@ pub fn clean_accounts(list: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn rec() -> ServiceRec {
+        ServiceRec {
+            name: "x".into(),
+            api_domain: "x.test".into(),
+            admin_domain: "admin.x.test".into(),
+            api_port: 1,
+            admin_port: 2,
+            dir: "x.test".into(),
+            created_at: 0,
+            pid: None,
+        }
+    }
+
     #[test]
     fn clean_accounts_trims_and_drops_empty() {
         let v = clean_accounts(&[
@@ -458,16 +633,35 @@ mod tests {
 
     #[test]
     fn tail_log_rejects_traversal() {
-        let rec = ServiceRec {
-            name: "x".into(),
-            domain: "x.test".into(),
-            api_port: 1,
-            admin_port: 2,
-            dir: "x.test".into(),
-            created_at: 0,
-            pid: None,
-        };
-        assert!(tail_log(&rec, "../secret", 10).is_err());
-        assert!(tail_log(&rec, "a/b.log", 10).is_err());
+        assert!(tail_log(&rec(), "../secret", 10).is_err());
+        assert!(tail_log(&rec(), "a/b.log", 10).is_err());
+    }
+
+    #[test]
+    fn set_env_keys_preserves_unknown_and_appends_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "acs-panel-env-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(".env");
+        fs::write(&p, "# c\nACS_PUBLIC_URL=https://old\nKEEP=1\n").unwrap();
+        set_env_keys(&p, &[("ACS_PUBLIC_URL", "https://new".into()), ("ACS_ADMIN_URL", "https://admin.new".into())])
+            .unwrap();
+        let t = fs::read_to_string(&p).unwrap();
+        assert!(t.contains("ACS_PUBLIC_URL=https://new"));
+        assert!(t.contains("KEEP=1"));
+        assert!(t.contains("ACS_ADMIN_URL=https://admin.new"));
+        assert!(!t.contains("old"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_file_name_format() {
+        let n = acs_core::log::log_file_name();
+        assert!(n.ends_with(".alphalog"));
+        assert_eq!(n.trim_end_matches(".alphalog").len(), 15, "YYMMDD-HH_mm_SS 共 15 字符：{n}");
     }
 }

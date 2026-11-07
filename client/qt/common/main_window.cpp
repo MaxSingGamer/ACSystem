@@ -391,7 +391,7 @@ QWidget *MainWindow::pageAbout()
     info->setWordWrap(true);
     info->setText(QStringLiteral("%1\n\n客户端版本：%2（后端 DLL %3，ABI %4）")
                       .arg(m_profile.appTitle,
-                           QStringLiteral("3.3.0"),
+                           QStringLiteral("4.0.0"),
                            Acs::version())
                       .arg(Acs::abiVersion()));
     inner->addWidget(info);

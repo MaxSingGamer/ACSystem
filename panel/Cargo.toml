@@ -1,7 +1,7 @@
 [package]
 build = "build.rs"
 name = "acs-panel"
-version = "3.3.0"
+version = "4.0.0"
 edition = "2024"
 description = "AlphaCoin 服务中心面板（Web）：多服务启停 / 日志 / AlphaTar 服务包"
 
@@ -25,5 +25,10 @@ anyhow = "1"
 flate2 = "1"
 aes-gcm = "0.10"
 rand = "0.8"
-hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
 sha2 = "0.11.0"
+# v4.0.0（Panel #1）：面板登录 / TOTP / Passkey（WebAuthn）
+sha1 = "0.10"
+base64 = "0.22"
+ciborium = "0.2"
+p256 = { version = "0.13", features = ["ecdsa"] }

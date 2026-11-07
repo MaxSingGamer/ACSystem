@@ -15,6 +15,7 @@ pub mod gpg_detect;
 pub mod legal;
 pub mod log;
 pub mod models;
+pub mod password;
 pub mod transaction;
 
 pub use errors::{AcsError, Result};

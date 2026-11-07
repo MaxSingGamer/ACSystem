@@ -1,7 +1,8 @@
-//! 面板 REST API（v3.3.0 #13）。
+//! 面板 REST API（v4.0.0）。
 //!
-//! 安全说明（D40）：面板默认只监听 `127.0.0.1`（见 `registry::panel_bind`）。
-//! 它能启停/删除服务，因此**不应**直接暴露公网；如需远程访问请用反向代理并自行加认证。
+//! 安全说明（D40）：面板默认只监听 `127.0.0.1`（见 `registry::panel_bind`），
+//! 且 v4.0.0 起**必须登录**才能做任何操作（Panel #1）。
+//! 它能启停/删除服务，因此**不应**直接暴露公网；如需远程访问请用反向代理。
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -14,17 +15,41 @@ use serde_json::json;
 
 use acs_core::config;
 
+use crate::auth;
 use crate::package;
+use crate::passkey;
 use crate::registry;
 use crate::service::{self, NewServiceReq, UpdateServiceReq};
 
+/// 面板共享状态（会话是内存态，面板重启即失效）。
 #[derive(Clone)]
 pub struct PanelState {
     pub version: String,
+    pub auth: auth::AuthState,
 }
 
 pub fn routes() -> Router<PanelState> {
+    // 登录/账户安全路由：请求体上限收紧到 64KB（防超大 body 的内存/解析放大）
+    let auth_routes: Router<PanelState> = Router::new()
+        // ---------- 登录 / 账户安全（Panel #1） ----------
+        .route("/api/auth/status", get(auth::status))
+        .route("/api/auth/account", get(auth::account_info))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/verify", post(auth::verify))
+        .route("/api/auth/change-credentials", post(auth::change_credentials))
+        .route("/api/auth/totp/begin", post(auth::totp_begin))
+        .route("/api/auth/totp/confirm", post(auth::totp_confirm))
+        .route("/api/auth/totp/remove", post(auth::totp_remove))
+        .route("/api/auth/passkey/login/begin", post(passkey::login_begin))
+        .route("/api/auth/passkey/login/finish", post(passkey::login_finish))
+        .route("/api/auth/passkey/register/begin", post(passkey::register_begin))
+        .route("/api/auth/passkey/register/finish", post(passkey::register_finish))
+        .route("/api/auth/passkey/remove", post(passkey::remove))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024));
     Router::new()
+        .merge(auth_routes)
+        // ---------- 面板 / 服务（需登录且已完成强制改密） ----------
         .route("/api/panel", get(get_panel).post(set_panel))
         .route("/api/services", get(list_services).post(create_service))
         .route(
@@ -33,6 +58,7 @@ pub fn routes() -> Router<PanelState> {
         )
         .route("/api/services/{name}/start", post(start_service))
         .route("/api/services/{name}/stop", post(stop_service))
+        .route("/api/services/{name}/resolve-dir", post(resolve_dir))
         .route("/api/services/{name}/logs", get(list_logs))
         .route("/api/services/{name}/logs/{file}", get(tail_log))
         .route("/api/services/{name}/export", get(export_package))
@@ -42,12 +68,13 @@ pub fn routes() -> Router<PanelState> {
 
 // ------------------------------- 面板配置 -------------------------------
 
-async fn get_panel(State(st): State<PanelState>) -> Json<serde_json::Value> {
+async fn get_panel(_user: auth::PanelUser, State(st): State<PanelState>) -> Json<serde_json::Value> {
     let cfg = registry::load_panel_config();
     Json(json!({
         "domain": cfg.domain,
         "port": cfg.port,
         "bind": registry::panel_bind(),
+        "url": registry::panel_url(&cfg),
         "configured": cfg.configured,
         "root": registry::server_root().display().to_string(),
         "version": st.version,
@@ -61,12 +88,15 @@ struct PanelCfgReq {
 }
 
 /// 保存面板域名/端口 → 自动重启面板（**不重启任何服务**，D38/第 9 条）。
-async fn set_panel(Json(req): Json<PanelCfgReq>) -> Response {
+async fn set_panel(
+    _user: auth::PanelUser,
+    Json(req): Json<PanelCfgReq>,
+) -> Response {
     if let Err(e) = registry::save_panel_config(&req.domain, req.port) {
         return err(StatusCode::BAD_REQUEST, e.to_string());
     }
     schedule_restart();
-    Json(json!({ "ok": true, "restarting": true, "message": "面板配置已保存，正在自动重启面板（各服务不受影响）" }))
+    Json(json!({ "ok": true, "restarting": true, "message": "面板配置已保存，正在自动重启面板（各服务不受影响；重启后需重新登录）" }))
         .into_response()
 }
 
@@ -88,7 +118,7 @@ fn schedule_restart() {
 
 // ------------------------------- 服务列表 -------------------------------
 
-async fn list_services() -> Response {
+async fn list_services(_user: auth::PanelUser) -> Response {
     let reg = match registry::load_registry() {
         Ok(r) => r,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -101,47 +131,70 @@ async fn list_services() -> Response {
             let (state, pid) = service::service_state(s);
             json!({
                 "name": s.name,
-                "domain": s.domain,
+                "api_domain": s.api_domain,
+                "admin_domain": s.admin_domain,
                 "api_port": s.api_port,
                 "admin_port": s.admin_port,
                 "dir": s.dir,
+                "dir_mismatch": s.dir_mismatch(),
                 "state": state,
                 "pid": pid,
-                "url": format!("https://{}", s.domain),
-                "admin_url": format!("https://{}/login", s.domain),
+                "url": format!("https://{}", s.api_domain),
+                // 后台入口用「后台管理域名」（Panel #3/#6）
+                "admin_url": format!("https://{}/login", s.admin_domain),
                 "created_at": s.created_at,
             })
         })
         .collect();
     Json(json!({
-        "panel": { "domain": panel.domain, "port": panel.port, "bind": registry::panel_bind() },
+        "panel": {
+            "domain": panel.domain,
+            "port": panel.port,
+            "bind": registry::panel_bind(),
+            "url": registry::panel_url(&panel),
+            "root": registry::server_root().display().to_string(),
+        },
         "services": items,
     }))
     .into_response()
 }
 
-async fn create_service(Json(req): Json<NewServiceReq>) -> Response {
+async fn create_service(_user: auth::PanelUser, Json(req): Json<NewServiceReq>) -> Response {
     match service::create_service(req) {
         Ok(rec) => Json(json!({ "ok": true, "service": rec })).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 
-async fn update_service(Path(name): Path<String>, Json(req): Json<UpdateServiceReq>) -> Response {
+async fn update_service(
+    _user: auth::PanelUser,
+    Path(name): Path<String>,
+    Json(req): Json<UpdateServiceReq>,
+) -> Response {
     match service::update_service(&name, req) {
-        Ok(rec) => Json(json!({ "ok": true, "service": rec })).into_response(),
+        Ok((rec, restarted)) => Json(json!({
+            "ok": true,
+            "service": rec,
+            "restarted": restarted,
+            "message": if restarted {
+                "已更新；服务原先在运行，已自动停止并重启以释放/重建文件夹"
+            } else {
+                "已更新"
+            }
+        }))
+        .into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 
-async fn delete_service(Path(name): Path<String>) -> Response {
+async fn delete_service(_user: auth::PanelUser, Path(name): Path<String>) -> Response {
     match service::delete_service(&name) {
         Ok(()) => Json(json!({ "ok": true, "message": format!("服务已删除：{name}") })).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 
-async fn start_service(Path(name): Path<String>) -> Response {
+async fn start_service(_user: auth::PanelUser, Path(name): Path<String>) -> Response {
     match service::start_service(&name) {
         Ok(pid) => Json(json!({ "ok": true, "pid": pid, "message": "服务已启动（首次启动会创建账户种子，可能稍慢）" }))
             .into_response(),
@@ -149,16 +202,34 @@ async fn start_service(Path(name): Path<String>) -> Response {
     }
 }
 
-async fn stop_service(Path(name): Path<String>) -> Response {
+async fn stop_service(_user: auth::PanelUser, Path(name): Path<String>) -> Response {
     match service::stop_service(&name) {
         Ok(()) => Json(json!({ "ok": true, "message": "服务已停止" })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
+#[derive(Deserialize)]
+struct ResolveDirReq {
+    /// "domain" = 用服务接口域名（重命名文件夹）；"dir" = 用文件夹名（改接口域名）
+    choice: String,
+}
+
+/// Panel #4：文件夹名与服务接口域名不一致时，由用户选择以哪一个为准。
+async fn resolve_dir(
+    _user: auth::PanelUser,
+    Path(name): Path<String>,
+    Json(req): Json<ResolveDirReq>,
+) -> Response {
+    match service::resolve_dir_mismatch(&name, req.choice.trim()) {
+        Ok(rec) => Json(json!({ "ok": true, "service": rec, "message": "已按所选命名统一" })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
 // ------------------------------- 日志 -------------------------------
 
-async fn list_logs(Path(name): Path<String>) -> Response {
+async fn list_logs(_user: auth::PanelUser, Path(name): Path<String>) -> Response {
     let Ok(reg) = registry::load_registry() else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "读取注册表失败");
     };
@@ -180,7 +251,11 @@ fn default_lines() -> usize {
     300
 }
 
-async fn tail_log(Path((name, file)): Path<(String, String)>, Query(q): Query<TailQuery>) -> Response {
+async fn tail_log(
+    _user: auth::PanelUser,
+    Path((name, file)): Path<(String, String)>,
+    Query(q): Query<TailQuery>,
+) -> Response {
     let Ok(reg) = registry::load_registry() else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "读取注册表失败");
     };
@@ -201,8 +276,9 @@ struct ExportQuery {
     password: String,
 }
 
-/// 导出 AlphaTar 服务包（D36）：`<域名>.gz.alphatar`，可选密码加密。
+/// 导出 AlphaTar 服务包（D36）：`<服务接口域名>.gz.alphatar`，可选密码加密。
 async fn export_package(
+    _user: auth::PanelUser,
     Path(name): Path<String>,
     Query(q): Query<ExportQuery>,
 ) -> Response {
@@ -224,7 +300,7 @@ async fn export_package(
         Ok(d) => d,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    let filename = format!("{}.gz.alphatar", rec.domain);
+    let filename = format!("{}.gz.alphatar", rec.api_domain);
     (
         StatusCode::OK,
         [
@@ -239,7 +315,7 @@ async fn export_package(
         .into_response()
 }
 
-async fn package_info(Path(name): Path<String>) -> Response {
+async fn package_info(_user: auth::PanelUser, Path(name): Path<String>) -> Response {
     let Ok(reg) = registry::load_registry() else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "读取注册表失败");
     };
@@ -252,7 +328,7 @@ async fn package_info(Path(name): Path<String>) -> Response {
         "ok": true,
         "dir": dir.display().to_string(),
         "size_bytes": size,
-        "suggested_name": format!("{}.gz.alphatar", rec.domain),
+        "suggested_name": format!("{}.gz.alphatar", rec.api_domain),
         "hint": registry::NO_EDIT_HINT,
     }))
     .into_response()
@@ -279,14 +355,22 @@ struct ImportQuery {
     name: String,
     #[serde(default)]
     password: String,
+    /// Panel #4：文件夹名与包内服务接口域名不一致时，用户的选择（domain / dir）
+    #[serde(default)]
+    dir_choice: String,
 }
 
 /// 导入 AlphaTar 服务包：
-/// 1) 解析包内容 → 2) 从包内 `.env` 读域名/端口 → 3) 校验名称/域名/端口冲突 →
-/// 4) 解包到 `~/.alphacoinserver/<域名>/` → 5) 写入 `servers.json`。
+/// 1) 解析包内容 → 2) 从包内 `.env` 读「服务接口域名 / 后台管理域名 / 端口」 →
+/// 3) 若包内顶层文件夹名与接口域名不一致，返回 409 让用户选择以哪一个为准（Panel #4）→
+/// 4) 校验名称/域名/端口冲突 → 5) 解包并统一到所选名字 → 6) 写入 `servers.json`。
 ///
 /// 名称在包内不存在（第 5 条：打包不打包服务名称），由导入方提供。
-async fn import_package(Query(q): Query<ImportQuery>, body: Bytes) -> Response {
+async fn import_package(
+    _user: auth::PanelUser,
+    Query(q): Query<ImportQuery>,
+    body: Bytes,
+) -> Response {
     let name = q.name.trim().to_string();
     if name.is_empty() {
         return err(StatusCode::BAD_REQUEST, "请填写服务名称");
@@ -302,17 +386,23 @@ async fn import_package(Query(q): Query<ImportQuery>, body: Bytes) -> Response {
         Ok(e) => e,
         Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    // 从包内 .env 读取识别信息（第 5 条）
     let tops = crate::tarx::top_level(&entries);
     if tops.len() != 1 {
         return err(StatusCode::BAD_REQUEST, "服务包结构异常：顶层应只有一个目录");
     }
     let top = tops[0].clone();
     let env = read_env_from_entries(&entries, &top);
-    let domain = env
+    let env_domain = env
         .as_ref()
         .map(|e| domain_of(package::env_get(e, "ACS_PUBLIC_URL").unwrap_or(&top)))
         .unwrap_or_else(|| top.clone());
+    let api_domain = if env_domain.trim().is_empty() { top.clone() } else { env_domain.clone() };
+    let admin_domain = env
+        .as_ref()
+        .and_then(|e| package::env_get(e, "ACS_ADMIN_URL"))
+        .map(domain_of)
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| registry::default_admin_domain(&api_domain));
     let api_port: u16 = env
         .as_ref()
         .and_then(|e| package::env_get(e, "ACS_PUBLIC_PORT"))
@@ -326,12 +416,40 @@ async fn import_package(Query(q): Query<ImportQuery>, body: Bytes) -> Response {
     if api_port == 0 || admin_port == 0 {
         return err(StatusCode::BAD_REQUEST, "包内 .env 缺少有效的 ACS_PUBLIC_PORT / ACS_ADMIN_PORT");
     }
+    // Panel #4：文件夹名 ≠ 服务接口域名 → 要求选择
+    let mismatch = top != api_domain;
+    let choice = q.dir_choice.trim();
+    if mismatch && choice != "domain" && choice != "dir" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "文件夹名与包内服务接口域名不一致：文件夹为 `{top}`，接口域名为 `{api_domain}`。请选择以哪一个为准。"
+                ),
+                "needs_dir_choice": true,
+                "folder": top,
+                "api_domain": api_domain,
+                "options": [
+                    { "value": "domain", "label": format!("使用服务接口域名 {api_domain}（重命名文件夹）") },
+                    { "value": "dir", "label": format!("使用文件夹名 {top}（把服务接口域名改为 {top}）") }
+                ]
+            })),
+        )
+            .into_response();
+    }
+    let api_domain = if mismatch && choice == "dir" { top.clone() } else { api_domain };
+    let admin_domain = if mismatch && choice == "dir" && admin_domain == registry::default_admin_domain(&env_domain) {
+        registry::default_admin_domain(&api_domain)
+    } else {
+        admin_domain
+    };
     let rec = registry::ServiceRec {
         name: name.clone(),
-        domain: domain.clone(),
+        api_domain: api_domain.clone(),
+        admin_domain,
         api_port,
         admin_port,
-        dir: domain.clone(),
+        dir: api_domain.clone(),
         created_at: chrono::Utc::now().timestamp(),
         pid: None,
     };
@@ -349,7 +467,7 @@ async fn import_package(Query(q): Query<ImportQuery>, body: Bytes) -> Response {
     if let Err(e) = crate::package::extract_package(&entries, &root) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
-    // 解包后目录名必须以域名一致（包内顶层可能用了旧名，这里以 .env 为准并对齐）
+    // 解包后目录名统一为所选名字
     let extracted = root.join(&top);
     let target = root.join(&rec.dir);
     if extracted != target && extracted.exists() {
@@ -360,6 +478,21 @@ async fn import_package(Query(q): Query<ImportQuery>, body: Bytes) -> Response {
             return err(StatusCode::INTERNAL_SERVER_ERROR, format!("重命名解包目录失败：{e}"));
         }
     }
+    // 同步 .env：域名/端口以注册表为准（选择「用文件夹名」时接口域名已改变）
+    let env_path = target.join(".env");
+    if env_path.exists() {
+        if let Err(e) = service::set_env_keys(
+            &env_path,
+            &[
+                ("ACS_PUBLIC_URL", format!("https://{}", rec.api_domain)),
+                ("ACS_PUBLIC_PORT", rec.api_port.to_string()),
+                ("ACS_ADMIN_URL", format!("https://{}", rec.admin_domain)),
+                ("ACS_ADMIN_PORT", rec.admin_port.to_string()),
+            ],
+        ) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    }
     let mut reg = reg;
     reg.servers.push(rec.clone());
     if let Err(e) = registry::save_registry(&reg) {
@@ -368,7 +501,7 @@ async fn import_package(Query(q): Query<ImportQuery>, body: Bytes) -> Response {
     Json(json!({
         "ok": true,
         "service": rec,
-        "message": "导入完成；如原服务使用不同端口/域名，可在面板内修改（仅域名与端口可改）"
+        "message": "导入完成；如需换端口/域名，可在面板内修改（仅域名与端口可改）"
     }))
     .into_response()
 }
@@ -393,7 +526,7 @@ fn read_env_from_entries(
     Some(out)
 }
 
-/// 从 `ACS_PUBLIC_URL` 提取域名；非法时回退到包内目录名。
+/// 从 URL 提取域名；非法时返回空串。
 fn domain_of(url: &str) -> String {
     if url.trim().is_empty() {
         return String::new();
@@ -419,5 +552,5 @@ pub fn version() -> &'static str {
 
 /// 供 main 复用的共享状态。
 pub fn state() -> PanelState {
-    PanelState { version: version().to_string() }
+    PanelState { version: version().to_string(), auth: auth::AuthState::default() }
 }

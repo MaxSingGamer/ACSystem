@@ -24,7 +24,7 @@ async fn brand() -> Json<serde_json::Value> {
         "union_abbr": b.union_abbr,
         "server_app": b.server_app,
         "client_app": b.client_app,
+        // public_url 供客户端拼接法律文档链接；admin_url 属内部信息，不对外暴露（D39/F5）
         "public_url": b.public_url,
-        "admin_url": b.admin_url,
     }))
 }

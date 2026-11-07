@@ -41,11 +41,22 @@ pub fn platform() -> String {
     }
 }
 
-/// 从安装包文件名解析版本：acs-client-3.2.0-windows-x64-setup.exe -> 3.2.0
+/// 从安装包文件名解析版本。
+/// - 旧命名：`acs-client-3.2.0-windows-x64-setup.exe` → `3.2.0`
+/// - 新命名（v3.3.0 起）：`AlphaWallet_v4.0.0_windows-x64.exe` → `4.0.0`
 fn version_from_filename(name: &str) -> Option<String> {
-    let name = name.strip_prefix("acs-client-")?;
-    let end = name.find('-')?;
-    Some(name[..end].to_string())
+    if let Some(rest) = name.strip_prefix("acs-client-") {
+        let end = rest.find('-')?;
+        return Some(rest[..end].to_string());
+    }
+    let (_, after) = name.split_once("_v")?;
+    let end = after.find('_').unwrap_or(after.len());
+    let ver = &after[..end];
+    if !ver.is_empty() && ver.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        Some(ver.to_string())
+    } else {
+        None
+    }
 }
 
 /// 简单版本比较：a > b。
@@ -98,7 +109,7 @@ fn github_latest(plat: &str, w: &Wallet) -> Option<(String, String, u128)> {
         for a in assets {
             let name = a.get("name").and_then(|v| v.as_str()).unwrap_or_default();
             let url = a.get("browser_download_url").and_then(|v| v.as_str()).unwrap_or_default();
-            if !name.contains(&format!("-{plat}-setup.exe")) {
+            if !(name.contains(&format!("-{plat}-setup.exe")) || name.contains(&format!("_{plat}."))) {
                 continue;
             }
             let Some(ver) = version_from_filename(name) else { continue };
@@ -248,7 +259,15 @@ pub fn download(w: &Wallet, source: &str, _expected_version: &str) -> Result<Val
     let j = server_info(w, &current, &plat)?;
     let latest = j.get("latest").and_then(|v| v.as_str()).unwrap_or(&current).to_string();
     let sha256 = j.get("sha256").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let file_name = format!("acs-client-{latest}-{plat}-setup.exe");
+    // 优先使用服务端清单登记的安装包文件名（v4.0.0：产品化命名 AlphaWallet_v*_windows-x64.exe）；
+    // 旧清单没有 file 时才回退到历史命名。
+    let file_name = j
+        .get("file")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("acs-client-{latest}-{plat}-setup.exe"));
     let server_dl = {
         let p = j.get("server_download_url").and_then(|v| v.as_str()).unwrap_or("");
         if p.starts_with("http") {

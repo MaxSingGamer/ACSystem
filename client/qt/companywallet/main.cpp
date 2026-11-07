@@ -1,4 +1,4 @@
-// AlphaBankmanage（企业 / 银行账户）——QT 客户端入口（D30：与 AlphaBankmanage 互相排斥）。
+// AlphaCompanyWallet（企业 / 银行账户）——QT 客户端入口（D30：与 AlphaCompanyWallet 互相排斥）。
 //
 // 启动流程（v3.3.0 #8/#11）：选中心服务（历史按服务名称区分 #15）→ 登录/注册 → 主窗口。
 //
@@ -53,7 +53,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     app.setWindowIcon(QIcon(QStringLiteral(":/icon-client.ico")));
     acs::applyTheme(app);
-    app.setApplicationName(QStringLiteral("AlphaBankmanage"));
+    app.setApplicationName(QStringLiteral("AlphaCompanyWallet"));
 
     const QString initErr = Acs::init();
     if (!initErr.isEmpty()) {
@@ -63,8 +63,8 @@ int main(int argc, char *argv[])
 
     // 企业版：只允许 企业 / 银行（个人与国家账户请用 AlphaWallet）
     acs::AppProfile profile{
-        QStringLiteral("AlphaBankmanage"),
-        QStringLiteral("AlphaBankmanage"),
+        QStringLiteral("AlphaCompanyWallet"),
+        QStringLiteral("AlphaCompanyWallet"),
         {QStringLiteral("Company")},
         true,
     };

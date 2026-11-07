@@ -1,22 +1,23 @@
-// 管理员（Admin，原「金融部」Finance）控制台。
-// v3.3.0（D18）：角色由 finance 更名为 admin；账号由 Root 创建/停用/重置密码。
+// 管理员（普通管理员 Admin）控制台（v4.0.0：新增「我的」页；改密二次键入）。
 document.querySelectorAll('.logo').forEach(e => e.innerHTML = LOGO_BADGE);
 
+let ME = null;
+
 async function init() {
-  const me = await api('/api/admin/me');
-  if (me.role !== 'admin') { location.href = '/root'; return; }
-  $('who').textContent = `${me.uid} · 管理员`;
+  ME = await api('/api/admin/me');
+  if (ME.role !== 'admin') { location.href = '/root'; return; }
+  $('who').textContent = `${ME.uid} · 管理员`;
   // v3.3.0（D15）：Admin 不持有主密钥副本，只能显示是否已由根管理员解锁
-  const mk = $('mkState'); if (mk) mk.textContent = me.master_key_unlocked ? '🔓 主密钥已解锁' : '🔒 主密钥未解锁（需根管理员登录）';
-  await Promise.all([loadOverview(), loadAccounts(), loadDaily(7)]);
+  const mk = $('mkState'); if (mk) mk.textContent = ME.master_key_unlocked ? '🔓 主密钥已解锁' : '🔒 主密钥未解锁（需根管理员登录）';
+  await Promise.all([loadOverview(), loadAccounts(), loadDaily(7), loadMy()]);
 }
 init().catch(e => { if (!TOKEN) location.href = '/login'; else alert(e.message); });
 
 function sec(s) {
   document.querySelectorAll('.section-tab').forEach(t => t.classList.toggle('on', t.dataset.s === s));
   document.querySelectorAll('.section').forEach(v => v.classList.toggle('on', v.id === 's-' + s));
-  // v3.3.0 D14：审计页不再有"解锁"这一步，切过去即直接加载
   if (s === 'aud') loadAuditTab();
+  if (s === 'my') loadMy();
 }
 
 /* ---------- 状态 ---------- */
@@ -32,6 +33,34 @@ async function loadDaily(days) {
   const d = await api('/api/stats/daily?days=' + days);
   const items = d.items || [];
   drawLineChart('dailyChart', items.map(x => ({ date: x.date, flow: Number(x.flow) })));
+}
+
+/* ---------- 我的（v4.0.0 Server #10） ---------- */
+async function loadMy() {
+  if (!ME) { try { ME = await api('/api/admin/me'); } catch (e) { return; } }
+  $('myInfo').innerHTML = `
+    <div class="kv-row"><span>UID</span><b class="mono">${esc(ME.uid)}</b></div>
+    <div class="kv-row"><span>角色</span><b>普通管理员</b></div>
+    <div class="kv-row"><span>上次登录</span><b>${tsFmt(ME.last_login)}</b></div>
+    <div class="kv-row"><span>创建时间</span><b>${tsFmt(ME.created_at)}</b></div>
+    <div class="kv-row"><span>主密钥</span><b>${ME.master_key_unlocked ? '🔓 已解锁' : '🔒 未解锁'}</b></div>
+    <div class="kv-row"><span>待强制改密</span><b>${ME.must_change_password ? '是（修改后生效）' : '否'}</b></div>`;
+}
+
+async function doMyChg() {
+  const old = $('myOld').value;
+  const np = $('myNew').value;
+  const np2 = $('myNew2').value;
+  const msg = $('myMsg');
+  if (!np || np.length < 8) { msg.textContent = '新密码至少 8 位'; return; }
+  if (np !== np2) { msg.textContent = '两次输入的新密码不一致'; return; }
+  if (!ME.must_change_password && !old) { msg.textContent = '请输入原密码'; return; }
+  try {
+    await api('/api/admin/change-password', { method: 'POST', body: JSON.stringify({
+      old_password: old || undefined, new_password: np, new_password_confirm: np2 }) });
+    msg.textContent = '修改成功，请重新登录…';
+    setTimeout(() => location.href = '/login', 900);
+  } catch (e) { msg.textContent = e.message; }
 }
 
 /* ---------- 账本账户（v3.3.0 D14/D21：可查/冻结/解冻全部类型，但不可注册或删除） ---------- */
@@ -63,9 +92,6 @@ async function accAction(uid, act) {
   loadAccounts();
 }
 
-/* ---------- 注（v3.3.0 #2）：成员企业认定已取消 ---------- */
-/* 企业账户现在与个人账户一样，凭同意协议即可由客户端自助注册，无需金融部认定。 */
-
 /* ---------- 审计（v3.3.0 D14：已取消二次密码校验，登录即可查看） ---------- */
 function loadAuditTab() { loadBills(); }
 
@@ -83,16 +109,6 @@ async function loadBills() {
       <td><span class="tag ${b.status.toLowerCase()}">${esc(b.status)}</span></td>
       <td class="mono" style="font-size:11px">${b.central_signed ? '✓ 已签名' : '—'}</td>
     </tr>`).join('') || '<tr><td colspan="7" class="muted">无记录</td></tr>';
-}
-
-/* ---------- 改密 ---------- */
-function showChg() { $('cMsg').textContent = ''; $('chgPanel').classList.remove('hidden'); }
-async function doChg() {
-  const old = $('cOld').value, np = $('cNew').value;
-  if (np.length < 8) { $('cMsg').textContent = '新密码至少 8 位'; return; }
-  await api('/api/admin/change-password', { method: 'POST', body: JSON.stringify({ old_password: old, new_password: np }) });
-  $('cMsg').textContent = '修改成功，请重新登录';
-  setTimeout(() => location.href = '/login', 800);
 }
 
 async function logout() {

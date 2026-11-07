@@ -1,21 +1,24 @@
-// 根管理员控制台。
+// 根管理员控制台（v4.0.0：账户双栏 / 我的页 / 顶栏规范化）。
 document.querySelectorAll('.logo').forEach(e => e.innerHTML = LOGO_BADGE);
 
+let ME = null;
+let RESET_UID = '';
+
 async function init() {
-  const me = await api('/api/admin/me');
-  if (me.role !== 'root') { location.href = '/admin'; return; }
-  $('who').textContent = `${me.uid} · 根管理员`;
+  ME = await api('/api/admin/me');
+  if (ME.role !== 'root') { location.href = '/admin'; return; }
+  $('who').textContent = `${ME.uid} · 根管理员`;
   // v3.3.0（D15）：主密钥解锁状态（根管理员登录即解锁）
-  const mk = $('mkState'); if (mk) mk.textContent = me.master_key_unlocked ? '🔓 主密钥已解锁' : '🔒 主密钥未解锁';
-  await Promise.all([loadOverview(), loadAccounts(), loadAdmins(), loadKeyStatus(), loadDaily(7)]);
+  const mk = $('mkState'); if (mk) mk.textContent = ME.master_key_unlocked ? '🔓 主密钥已解锁' : '🔒 主密钥未解锁';
+  await Promise.all([loadOverview(), loadAccounts(), loadAdmins(), loadKeyStatus(), loadDaily(7), loadMy()]);
 }
 init().catch(e => { if (!TOKEN) location.href = '/login'; else alert(e.message); });
 
 function sec(s) {
   document.querySelectorAll('.section-tab').forEach(t => t.classList.toggle('on', t.dataset.s === s));
   document.querySelectorAll('.section').forEach(v => v.classList.toggle('on', v.id === 's-' + s));
-  // v3.3.0 D14：审计页不再有"解锁"这一步，切过去即直接加载
   if (s === 'aud') loadAuditTab();
+  if (s === 'my') loadMy();
 }
 
 /* ---------- 状态 ---------- */
@@ -36,6 +39,34 @@ async function loadDaily(days) {
   drawLineChart('dailyChart', items.map(x => ({ date: x.date, flow: Number(x.flow) })));
 }
 
+/* ---------- 我的（v4.0.0 Server #10：自身信息与改自身密码都在这里） ---------- */
+async function loadMy() {
+  if (!ME) { try { ME = await api('/api/admin/me'); } catch (e) { return; } }
+  $('myInfo').innerHTML = `
+    <div class="kv-row"><span>UID</span><b class="mono">${esc(ME.uid)}</b></div>
+    <div class="kv-row"><span>角色</span><b>根管理员</b></div>
+    <div class="kv-row"><span>上次登录</span><b>${tsFmt(ME.last_login)}</b></div>
+    <div class="kv-row"><span>创建时间</span><b>${tsFmt(ME.created_at)}</b></div>
+    <div class="kv-row"><span>主密钥</span><b>${ME.master_key_unlocked ? '🔓 已解锁' : '🔒 未解锁'}</b></div>
+    <div class="kv-row"><span>待强制改密</span><b>${ME.must_change_password ? '是（修改后生效）' : '否'}</b></div>`;
+}
+
+async function doMyChg() {
+  const old = $('myOld').value;
+  const np = $('myNew').value;
+  const np2 = $('myNew2').value;
+  const msg = $('myMsg');
+  if (!np || np.length < 8) { msg.textContent = '新密码至少 8 位'; return; }
+  if (np !== np2) { msg.textContent = '两次输入的新密码不一致'; return; }
+  if (!ME.must_change_password && !old) { msg.textContent = '请输入原密码'; return; }
+  try {
+    await api('/api/admin/change-password', { method: 'POST', body: JSON.stringify({
+      old_password: old || undefined, new_password: np, new_password_confirm: np2 }) });
+    msg.textContent = '修改成功，请重新登录…';
+    setTimeout(() => location.href = '/login', 900);
+  } catch (e) { msg.textContent = e.message; }
+}
+
 /* ---------- 账户 ---------- */
 async function loadAccounts() {
   const atype = $('accType').value, q = $('accSearch').value.trim();
@@ -46,14 +77,13 @@ async function loadAccounts() {
     <tr>
       <td class="mono">${esc(a.uid)}</td>
       <td>${esc(a.fullname || '—')}</td>
-      <td>${esc(a.email || '—')}</td>
       <td class="mono">${fmtA(a.balance)} A€</td>
       <td><span class="tag ${a.status.toLowerCase()}">${esc(a.status)}</span></td>
       <td class="ops">
         ${a.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="accAction('${atype}','${esc(a.uid)}','freeze')">冻结</button>` : ''}
         ${a.status === 'Frozen' ? `<button class="btn-sm btn-secondary" onclick="accAction('${atype}','${esc(a.uid)}','unfreeze')">解冻</button>` : ''}
       </td>
-    </tr>`).join('') || '<tr><td colspan="6" class="muted">无记录</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">无记录</td></tr>';
 }
 
 async function accAction(atype, uid, act) {
@@ -62,17 +92,18 @@ async function accAction(atype, uid, act) {
   loadAccounts();
 }
 
+/* ---------- 管理员（v4.0.0 Server #8/#9：改 Admin 密码的入口在本栏的操作按钮里） ---------- */
 async function loadAdmins() {
   const d = await api('/api/admins');
   const rows = d.items || [];
   $('adminBody').innerHTML = rows.map(a => `
     <tr>
       <td class="mono">${esc(a.uid)}</td>
-      <td>${a.role === 'root' ? '根管理员' : '管理员'}</td>
+      <td>${a.role === 'root' ? '根管理员' : '普通管理员'}</td>
       <td><span class="tag ${a.status.toLowerCase()}">${esc(a.status)}</span>${a.must_change_password ? ' <span class="tag pending">待改密</span>' : ''}</td>
       <td class="ops">
         ${a.role === 'root' ? '<span class="muted">—</span>' : `
-          <button class="btn-sm btn-secondary" onclick="showChg('${esc(a.uid)}')">重置密码</button>
+          <button class="btn-sm btn-secondary" onclick="showReset('${esc(a.uid)}')">重置密码</button>
           ${a.status === 'Active' ? `<button class="btn-sm btn-secondary" onclick="adminToggle(${a.id},'disable')">停用</button>` : ''}
           ${a.status === 'Disabled' ? `<button class="btn-sm btn-secondary" onclick="adminToggle(${a.id},'enable')">启用</button>` : ''}`}
       </td>
@@ -80,15 +111,37 @@ async function loadAdmins() {
 }
 
 async function createAdmin() {
-  // v3.3.0（D17/D18）：此处只能创建「管理员（Admin）」；Root 账户首启后不可增减。
-  const uid = $('aUid').value.trim(), pwd = $('aPwd').value;
+  // v3.3.0（D17/D18）：此处只能创建「普通管理员（Admin）」；Root 账户首启后不可增减。
+  const uid = $('aUid').value.trim(), pwd = $('aPwd').value, pwd2 = $('aPwd2').value;
   if (!uid || pwd.length < 8) { alert('请填写 UID 与至少 8 位初始密码'); return; }
+  if (pwd !== pwd2) { alert('两次输入的初始密码不一致'); return; }
   await api('/api/admins', { method: 'POST', body: JSON.stringify({ uid, password: pwd }) });
-  $('aUid').value = ''; $('aPwd').value = '';
+  $('aUid').value = ''; $('aPwd').value = ''; $('aPwd2').value = '';
   loadAdmins();
 }
 
 async function adminToggle(id, act) { await api(`/api/admins/${id}/${act}`, { method: 'POST' }); loadAdmins(); }
+
+/* 重置普通管理员密码（二次键入） */
+function showReset(uid) {
+  RESET_UID = uid;
+  $('resetWho').textContent = `目标管理员：${uid}`;
+  $('rNew').value = ''; $('rNew2').value = ''; $('rMsg').textContent = '';
+  $('resetPanel').classList.remove('hidden');
+}
+async function doReset() {
+  const np = $('rNew').value, np2 = $('rNew2').value;
+  const msg = $('rMsg');
+  if (!np || np.length < 8) { msg.textContent = '新密码至少 8 位'; return; }
+  if (np !== np2) { msg.textContent = '两次输入的新密码不一致'; return; }
+  try {
+    await api('/api/admin/change-password', { method: 'POST', body: JSON.stringify({
+      new_password: np, new_password_confirm: np2, target_uid: RESET_UID }) });
+    msg.textContent = '已重置';
+    $('resetPanel').classList.add('hidden');
+    loadAdmins();
+  } catch (e) { msg.textContent = e.message; }
+}
 
 /* ---------- 注（v3.3.0 #2）：成员国家 / 企业认定已取消 ---------- */
 /* 国家 / 企业账户现在与个人账户一样，凭同意协议即可由客户端自助注册，无需理事会认定。 */
@@ -124,7 +177,6 @@ async function doMint() {
 }
 
 /* ---------- 审计（v3.3.0 D14：已取消二次密码校验，登录即可查看） ---------- */
-/// 切到审计页时直接加载（不再要求输密码）。
 function loadAuditTab() {
   const ac = $('audContent'), bp = $('billPanel');
   if (ac) ac.classList.remove('hidden');
@@ -166,19 +218,6 @@ async function loadBills() {
       <td><span class="tag ${b.status.toLowerCase()}">${esc(b.status)}</span></td>
       <td class="mono" style="font-size:11px">${b.central_signed ? '✓ 已签名' : '—'}</td>
     </tr>`).join('') || '<tr><td colspan="7" class="muted">无记录</td></tr>';
-}
-
-/* ---------- 改密 ---------- */
-function showChg(target) { $('cTarget').value = target || ''; $('cMsg').textContent = ''; $('chgPanel').classList.remove('hidden'); }
-
-async function doChg() {
-  const old = $('cOld').value, np = $('cNew').value, tgt = $('cTarget').value.trim();
-  if (np.length < 8) { $('cMsg').textContent = '新密码至少 8 位'; return; }
-  await api('/api/admin/change-password', { method: 'POST', body: JSON.stringify({
-    old_password: old || undefined, new_password: np, target_uid: tgt || undefined }) });
-  $('cMsg').textContent = '修改成功' + (tgt ? '' : '，请重新登录');
-  if (!tgt) { setTimeout(() => location.href = '/login', 800); }
-  else { $('chgPanel').classList.add('hidden'); loadAdmins(); }
 }
 
 async function logout() {

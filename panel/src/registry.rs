@@ -1,13 +1,19 @@
-//! 面板配置与服务中心注册表（v3.3.0 #13 / D20 / D25 / D37）。
+//! 面板配置与服务中心注册表（v4.0.0：服务域名拆分为「服务接口域名 / 后台管理域名」）。
 //!
 //! 文件（均在 `~/.alphacoinserver/` 下）：
-//! - `.env`        面板自身配置：`ACS_PANEL_DOMAIN`（仅记录）+ `ACS_PANEL_PORT`（默认 9600）
-//! - `servers.json` 已注册的服务清单（`name/domain/api_port/admin_port/dir`）
+//! - `.env`            面板自身配置：`ACS_PANEL_DOMAIN`（面板域名，仅记录）+ `ACS_PANEL_PORT`（默认 9600）
+//! - `panel-account.json` 面板登录账户（见 `auth.rs`）
+//! - `servers.json`    已注册的服务清单
+//!
+//! 域名（v4.0.0 Panel #3）：
+//! - **服务接口域名（api_domain）**：客户端 API 域名，**唯一识别符**，同时决定服务文件夹名；
+//! - **后台管理域名（admin_domain）**：网页域名，仅用于把人带到该服务的后台登录页。
 //!
 //! 规则：
-//! - **服务名称唯一**、**域名唯一**、**API/管理端口各自唯一**，且都不得与面板冲突；
+//! - **服务名称唯一**、**两个域名各自唯一**、**API/管理端口各自唯一**，且都不得与面板冲突；
 //! - 服务端口**没有默认值**（D25），新建/导入时必须显式填写；
-//! - 新建 / 导入后**只允许改域名与端口**；改域名要同步「文件夹名 + 注册表 + 该服务 .env」。
+//! - 新建 / 导入后**只允许改域名与端口**；改「服务接口域名」要同步「文件夹名 + 注册表 + 该服务 .env」，
+//!   且必须**先停止服务**（Windows 下运行中的进程会占用文件夹，导致改名失败）。
 
 use std::fs;
 use std::path::PathBuf;
@@ -24,6 +30,7 @@ pub const NO_EDIT_HINT: &str = "⚠️ 请勿手动修改本文件（由 AlphaCo
 
 #[derive(Debug, Clone)]
 pub struct PanelConfig {
+    /// 面板域名（仅记录/展示；顶栏会显示 `https://<域名>`）。
     pub domain: String,
     pub port: u16,
     /// 配置是否已由用户在面板内确认过（首次启动为 false → UI 引导）
@@ -86,11 +93,11 @@ pub fn save_panel_config(domain: &str, port: u16) -> Result<()> {
     let domain = domain.trim();
     let text = format!(
         "# {NO_EDIT_HINT}\n\
-         # 面板域名：仅作标识/记录，不参与任何网络绑定（不要求可解析）\n\
+         # 面板域名：用于顶栏显示与 Passkey 的 rpId（不参与本进程网络绑定）\n\
          ACS_PANEL_DOMAIN={domain}\n\
          # 面板 Web 监听端口（默认 9600；修改后需重启面板）\n\
          ACS_PANEL_PORT={port}\n\
-         # 面板仅监听本机（D40）：如需公网访问请用反向代理并自行加认证\n\
+         # 面板仅监听本机（D40）：如需公网访问请用反向代理（按这里的域名）\n\
          ACS_PANEL_BIND=127.0.0.1\n"
     );
     fs::write(panel_env_path(), text).context("写入面板 .env 失败")?;
@@ -112,21 +119,42 @@ pub fn panel_bind() -> String {
     "127.0.0.1".into()
 }
 
+/// 面板对外地址（v4.0.0 Panel #6：顶栏显示设定的面板域名）。
+pub fn panel_url(cfg: &PanelConfig) -> String {
+    if cfg.domain.trim().is_empty() {
+        format!("http://{}:{}", panel_bind(), cfg.port)
+    } else {
+        format!("https://{}", cfg.domain.trim())
+    }
+}
+
 // ============================ 服务注册表 ============================
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServiceRec {
     pub name: String,
-    pub domain: String,
+    /// 服务接口域名（API）：唯一识别符，同时是服务文件夹名（见 `dir`）。
+    #[serde(alias = "domain")]
+    pub api_domain: String,
+    /// 后台管理域名：网页入口，仅用于重定向到管理后台登录页。
+    #[serde(default)]
+    pub admin_domain: String,
     pub api_port: u16,
     pub admin_port: u16,
-    /// 相对 `~/.alphacoinserver/` 的目录名（通常等于 domain）
+    /// 相对 `~/.alphacoinserver/` 的目录名（正常情况下等于 `api_domain`）。
     pub dir: String,
     #[serde(default)]
     pub created_at: i64,
     /// 面板启动的服务进程 PID（运行态提示；退出后可能失效，以端口探测为准）
     #[serde(default)]
     pub pid: Option<u32>,
+}
+
+impl ServiceRec {
+    /// 文件夹名与服务接口域名是否不一致（v4.0.0 Panel #4：需要用户选择以哪一个为准）。
+    pub fn dir_mismatch(&self) -> bool {
+        self.dir != self.api_domain
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -153,7 +181,25 @@ pub fn load_registry() -> Result<Registry> {
     let mut r: Registry = serde_json::from_str(&text)
         .with_context(|| format!("{} 解析失败（可能被手动改坏）", p.display()))?;
     r.comment = NO_EDIT_HINT.to_string();
+    // 兼容旧注册表：缺 admin_domain / dir 时补默认值
+    for s in &mut r.servers {
+        if s.admin_domain.trim().is_empty() {
+            s.admin_domain = default_admin_domain(&s.api_domain);
+        }
+        if s.dir.trim().is_empty() {
+            s.dir = s.api_domain.clone();
+        }
+    }
     Ok(r)
+}
+
+/// 未配置后台管理域名时的默认值：`admin.<服务接口域名>`。
+pub fn default_admin_domain(api_domain: &str) -> String {
+    if api_domain.trim().is_empty() {
+        String::new()
+    } else {
+        format!("admin.{}", api_domain.trim())
+    }
 }
 
 pub fn save_registry(reg: &Registry) -> Result<()> {
@@ -169,6 +215,17 @@ pub fn save_registry(reg: &Registry) -> Result<()> {
     Ok(())
 }
 
+/// 合法的文件夹名：非空、不含路径分隔符与 `..`、不是绝对路径。
+fn valid_dir_name(dir: &str) -> bool {
+    !dir.trim().is_empty()
+        && dir != "."
+        && dir != ".."
+        && !dir.contains('/')
+        && !dir.contains('\\')
+        && !dir.contains(':')
+        && !dir.contains("..")
+}
+
 /// 校验一个候选服务记录是否与「面板 + 其他服务」冲突。
 /// `skip_name`：更新时跳过自身（按 name 匹配）。
 pub fn validate_no_conflict(reg: &Registry, cand: &ServiceRec, skip_name: Option<&str>) -> Result<()> {
@@ -176,8 +233,17 @@ pub fn validate_no_conflict(reg: &Registry, cand: &ServiceRec, skip_name: Option
     if cand.name.trim().is_empty() {
         bail!("服务名称不能为空");
     }
-    if cand.domain.trim().is_empty() {
-        bail!("域名不能为空");
+    if cand.api_domain.trim().is_empty() {
+        bail!("服务接口域名不能为空");
+    }
+    if cand.admin_domain.trim().is_empty() {
+        bail!("后台管理域名不能为空");
+    }
+    if cand.api_domain.trim().eq_ignore_ascii_case(cand.admin_domain.trim()) {
+        bail!("服务接口域名与后台管理域名不能相同");
+    }
+    if !valid_dir_name(&cand.dir) {
+        bail!("文件夹名非法：{}", cand.dir);
     }
     if cand.api_port == 0 || cand.admin_port == 0 {
         bail!("端口必须为 1–65535，且不能为 0");
@@ -186,8 +252,11 @@ pub fn validate_no_conflict(reg: &Registry, cand: &ServiceRec, skip_name: Option
         bail!("API 端口与管理端口不能相同");
     }
     // 面板冲突
-    if !panel.domain.trim().is_empty() && panel.domain.trim() == cand.domain.trim() {
-        bail!("域名与面板冲突：{}", cand.domain);
+    if !panel.domain.trim().is_empty() && panel.domain.trim().eq_ignore_ascii_case(cand.api_domain.trim()) {
+        bail!("服务接口域名与面板域名冲突：{}", cand.api_domain);
+    }
+    if !panel.domain.trim().is_empty() && panel.domain.trim().eq_ignore_ascii_case(cand.admin_domain.trim()) {
+        bail!("后台管理域名与面板域名冲突：{}", cand.admin_domain);
     }
     if cand.api_port == panel.port || cand.admin_port == panel.port {
         bail!("端口与面板端口 {} 冲突", panel.port);
@@ -199,8 +268,20 @@ pub fn validate_no_conflict(reg: &Registry, cand: &ServiceRec, skip_name: Option
         if s.name.eq_ignore_ascii_case(cand.name.trim()) {
             bail!("服务名称已被占用：{}", cand.name);
         }
-        if s.domain.eq_ignore_ascii_case(cand.domain.trim()) {
-            bail!("域名已被占用：{}", cand.domain);
+        if s.api_domain.eq_ignore_ascii_case(cand.api_domain.trim()) {
+            bail!("服务接口域名已被占用：{}", cand.api_domain);
+        }
+        if s.admin_domain.eq_ignore_ascii_case(cand.admin_domain.trim()) {
+            bail!("后台管理域名已被占用：{}", cand.admin_domain);
+        }
+        // 交叉冲突：某服务的接口域名不能等于别的服务的后台域名
+        if s.admin_domain.eq_ignore_ascii_case(cand.api_domain.trim())
+            || s.api_domain.eq_ignore_ascii_case(cand.admin_domain.trim())
+        {
+            bail!("域名与已有服务冲突：{} / {}", cand.api_domain, cand.admin_domain);
+        }
+        if s.dir.eq_ignore_ascii_case(&cand.dir) && s.name != cand.name {
+            bail!("文件夹名已被其他服务占用：{}", cand.dir);
         }
         if s.api_port == cand.api_port {
             bail!("API 端口已被其他服务占用：{}", cand.api_port);
@@ -225,13 +306,14 @@ pub fn service_dir(rec: &ServiceRec) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn rec(name: &str, domain: &str, api: u16, admin: u16) -> ServiceRec {
+    fn rec(name: &str, api: &str, admin: &str, ap: u16, admp: u16) -> ServiceRec {
         ServiceRec {
             name: name.into(),
-            domain: domain.into(),
-            api_port: api,
-            admin_port: admin,
-            dir: domain.into(),
+            api_domain: api.into(),
+            admin_domain: admin.into(),
+            api_port: ap,
+            admin_port: admp,
+            dir: api.into(),
             created_at: 0,
             pid: None,
         }
@@ -241,28 +323,59 @@ mod tests {
     fn conflicts() {
         let reg = Registry {
             comment: String::new(),
-            servers: vec![rec("A", "a.test", 9700, 9701)],
+            servers: vec![rec("A", "a.test", "admin.a.test", 9700, 9701)],
         };
-        assert!(validate_no_conflict(&reg, &rec("B", "b.test", 9702, 9703), None).is_ok());
-        assert!(validate_no_conflict(&reg, &rec("A", "b.test", 9702, 9703), None).is_err(), "重名");
+        assert!(validate_no_conflict(&reg, &rec("B", "b.test", "admin.b.test", 9702, 9703), None).is_ok());
+        assert!(validate_no_conflict(&reg, &rec("A", "b.test", "admin.b.test", 9702, 9703), None).is_err(), "重名");
         assert!(
-            validate_no_conflict(&reg, &rec("B", "a.test", 9702, 9703), None).is_err(),
-            "域名重复"
+            validate_no_conflict(&reg, &rec("B", "a.test", "admin.b.test", 9702, 9703), None).is_err(),
+            "接口域名重复"
         );
-        assert!(validate_no_conflict(&reg, &rec("B", "b.test", 9700, 9703), None).is_err(), "API 端口重复");
         assert!(
-            validate_no_conflict(&reg, &rec("B", "b.test", 9702, 9701), None).is_err(),
+            validate_no_conflict(&reg, &rec("B", "b.test", "admin.a.test", 9702, 9703), None).is_err(),
+            "管理域名重复"
+        );
+        // 交叉冲突：B 的接口域名 == A 的管理域名
+        assert!(
+            validate_no_conflict(&reg, &rec("B", "admin.a.test", "admin.b.test", 9702, 9703), None).is_err(),
+            "接口域名撞他人管理域名"
+        );
+        assert!(validate_no_conflict(&reg, &rec("B", "b.test", "admin.b.test", 9700, 9703), None).is_err(), "API 端口重复");
+        assert!(
+            validate_no_conflict(&reg, &rec("B", "b.test", "admin.b.test", 9702, 9701), None).is_err(),
             "管理端口重复"
         );
         // 更新自身时跳过
-        assert!(validate_no_conflict(&reg, &rec("A", "a.test", 9700, 9701), Some("A")).is_ok());
+        assert!(
+            validate_no_conflict(&reg, &rec("A", "a.test", "admin.a.test", 9700, 9701), Some("A")).is_ok()
+        );
     }
 
     #[test]
-    fn rejects_same_ports_and_zero() {
+    fn rejects_same_ports_zero_and_bad_dir() {
         let reg = Registry::default();
-        assert!(validate_no_conflict(&reg, &rec("A", "a.test", 9700, 9700), None).is_err());
-        assert!(validate_no_conflict(&reg, &rec("A", "a.test", 0, 9701), None).is_err());
-        assert!(validate_no_conflict(&reg, &rec("", "a.test", 9700, 9701), None).is_err());
+        assert!(validate_no_conflict(&reg, &rec("A", "a.test", "admin.a.test", 9700, 9700), None).is_err());
+        assert!(validate_no_conflict(&reg, &rec("A", "a.test", "admin.a.test", 0, 9701), None).is_err());
+        assert!(validate_no_conflict(&reg, &rec("", "a.test", "admin.a.test", 9700, 9701), None).is_err());
+        // 接口域名 == 管理域名
+        assert!(validate_no_conflict(&reg, &rec("A", "a.test", "a.test", 9700, 9701), None).is_err());
+        // 非法文件夹名
+        let mut bad = rec("A", "a.test", "admin.a.test", 9700, 9701);
+        bad.dir = "../evil".into();
+        assert!(validate_no_conflict(&reg, &bad, None).is_err());
+    }
+
+    #[test]
+    fn dir_mismatch_flag() {
+        let mut r = rec("A", "a.test", "admin.a.test", 9700, 9701);
+        assert!(!r.dir_mismatch());
+        r.dir = "old-folder".into();
+        assert!(r.dir_mismatch());
+    }
+
+    #[test]
+    fn default_admin_domain_is_prefixed() {
+        assert_eq!(default_admin_domain("a.test"), "admin.a.test");
+        assert_eq!(default_admin_domain(""), "");
     }
 }

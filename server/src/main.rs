@@ -77,9 +77,23 @@ async fn main() -> anyhow::Result<()> {
     // 全部可由 .env 定制（已存在的真实环境变量优先，不被覆盖）。
     // 必须在读取任何配置之前调用（见 config::load_env_file 的调用时机说明）。
     let env_loaded = acs_core::config::load_env_file(&cfg.data_dir);
-    // 初始化日志（v3.3.0：`<数据目录>/logs/*.log`，按服务域名分目录）
-    let _ = log::init(&cfg.data_dir.join("logs"));
+    // 初始化日志（v4.0.0：`<数据目录>/logs/YYMMDD-HH_mm_SS.alphalog`）
+    // 面板启动本服务时会传 `-logfile <绝对路径>`：直接使用该文件，
+    // 不再产生 `panel-spawn.log` 这类「面板转发日志」——日志只由 Server 自己写。
+    let log_dir = cfg.data_dir.join("logs");
+    let log_path = arg_value(&["-logfile", "--logfile"]).map(PathBuf::from);
+    match &log_path {
+        Some(p) => {
+            let _ = log::init_file(p);
+        }
+        None => {
+            let _ = log::init(&log_dir);
+        }
+    }
     log::info(format!("AlphaCoinServer 启动 v{} 数据目录: {}", acs_core::VERSION, cfg.data_dir.display()));
+    if let Some(p) = log::path() {
+        println!("[AlphaCoinServer] 日志文件: {}", p.display());
+    }
     println!("[AlphaCoinServer] 数据目录: {}", cfg.data_dir.display());
     if env_loaded > 0 {
         println!("[AlphaCoinServer] 已从 .env 载入 {env_loaded} 项配置");
@@ -145,10 +159,16 @@ async fn main() -> anyhow::Result<()> {
             ),
         ))
         .layer(axum::middleware::from_fn(crate::api::log_request))
+        .layer(axum::middleware::from_fn(crate::api::sanitize_errors))
+        .layer(axum::middleware::from_fn(crate::api::inflight_cap))
+        .layer(axum::middleware::from_fn(crate::api::rate_limit_admin))
         .with_state(state.clone());
 
-    // 公开服务：仅 client 所需端点（无后台管理）
+    // 公开服务：仅 client 所需端点（无后台管理）。
+    // v4.0.0（Panel #3）：服务接口域名（API）只承担接口与唯一识别；
+    // 直接访问其根路径时重定向到「后台管理域名」的登录页，避免用户误把 API 域名当后台入口。
     let public_app: Router = Router::new()
+        .route("/", axum::routing::get(web::redirect_to_admin))
         .merge(api::public_routes())
         .layer(RequestBodyLimitLayer::new(4 * 1024 * 1024))
         .layer(TimeoutLayer::with_status_code(
@@ -168,6 +188,9 @@ async fn main() -> anyhow::Result<()> {
             axum::http::HeaderValue::from_static("DENY"),
         ))
         .layer(axum::middleware::from_fn(crate::api::log_request))
+        .layer(axum::middleware::from_fn(crate::api::sanitize_errors))
+        .layer(axum::middleware::from_fn(crate::api::inflight_cap))
+        .layer(axum::middleware::from_fn(crate::api::rate_limit_public))
         .with_state(state);
 
     let public_bind = std::env::var("ACS_PUBLIC_BIND").unwrap_or_else(|_| "0.0.0.0".into());

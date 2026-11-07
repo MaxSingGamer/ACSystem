@@ -1,4 +1,4 @@
-// AlphaWallet（个人 + 国家 + 系统账户）——QT 客户端入口（D30：与 AlphaBankmanage 互相排斥）。
+// AlphaWallet（个人 + 国家 + 系统账户）——QT 客户端入口（D30：与 AlphaCompanyWallet 互相排斥）。
 //
 // 启动流程（v3.3.0 #8/#11）：选中心服务（历史按服务名称区分 #15）→ 登录/注册 → 主窗口。
 //
@@ -61,7 +61,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // 个人版：只允许 个人 / 国家 / 系统（企业账户请用 AlphaBankmanage）
+    // 个人版：只允许 个人 / 国家 / 系统（企业账户请用 AlphaCompanyWallet）
     acs::AppProfile profile{
         QStringLiteral("Alpha Wallet"),
         QStringLiteral("Alpha Wallet"),

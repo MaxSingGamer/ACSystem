@@ -1,4 +1,4 @@
-//! WebView 登录/注册辅助（Tauri command 与 CLI 共用）。
+//! 登录/注册辅助（QT 客户端与 AlphaCoinClientCli 共用）。
 
 use acs_core::models::AccountType;
 

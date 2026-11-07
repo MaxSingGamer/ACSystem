@@ -4,7 +4,7 @@
 #   acs_abi        公共静态库（C++ 侧 C ABI 封装，UTF-8/JSON）
 #   abi_smoke      控制台冒烟测试：验证 DLL 加载 + 4 个导出符号 + 基本方法
 #   AlphaWallet    个人 + 国家客户端（QT）
-#   AlphaBankmanage 企业（银行）客户端（QT）
+#   AlphaCompanyWallet 企业（银行）客户端（QT）
 #
 # 构建（Windows / MSVC）：
 #   cmake -S client/qt -B build/qt -G Ninja ^
@@ -12,10 +12,10 @@
 #         -DACS_CLIENT_CORE_DLL="<repo>/target/debug/acs_client_core.dll"
 #   cmake --build build/qt
 #
-# 说明：AlphaWallet / AlphaBankmanage 的界面源文件在后续步骤加入；本文件先保证
+# 说明：AlphaWallet / AlphaCompanyWallet 的界面源文件在后续步骤加入；本文件先保证
 # abi_smoke 可构建，作为 QT 环境与 DLL 集成的第一道验证。
 cmake_minimum_required(VERSION 3.21)
-project(AlphaCoinClients LANGUAGES CXX)
+project(AlphaWallets LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -81,14 +81,14 @@ target_link_libraries(acs_ui PUBLIC acs_abi Qt6::Widgets)
 add_executable(AlphaWallet WIN32 wallet/main.cpp win/app.rc win/icon.qrc)
 target_link_libraries(AlphaWallet PRIVATE acs_ui Qt6::Widgets)
 
-add_executable(AlphaBankmanage WIN32 bankmanage/main.cpp win/app.rc win/icon.qrc)
-target_link_libraries(AlphaBankmanage PRIVATE acs_ui Qt6::Widgets)
+add_executable(AlphaCompanyWallet WIN32 companywallet/main.cpp win/app.rc win/icon.qrc)
+target_link_libraries(AlphaCompanyWallet PRIVATE acs_ui Qt6::Widgets)
 
 # 把 Rust DLL 复制到输出目录（GUI 同样需要同目录可加载）
 if(EXISTS "${ACS_CLIENT_CORE_DLL}")
   add_custom_command(TARGET AlphaWallet POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ACS_CLIENT_CORE_DLL}" "${ACS_QT_OUTPUT_DIR}")
-  add_custom_command(TARGET AlphaBankmanage POST_BUILD
+  add_custom_command(TARGET AlphaCompanyWallet POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ACS_CLIENT_CORE_DLL}" "${ACS_QT_OUTPUT_DIR}")
 endif()
 
