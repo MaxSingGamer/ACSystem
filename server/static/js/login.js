@@ -23,13 +23,15 @@ async function doLogin() {
 
 async function doChange() {
   const np = $('np').value;
+  const np2 = $('np2').value;
   if (np.length < 8) { msg('chgMsg', '新密码至少 8 位'); return; }
+  if (!np2) { msg('chgMsg', '请再次输入新密码以确认'); return; }
+  if (np !== np2) { msg('chgMsg', '两次输入的新密码不一致'); return; }
   try {
-    // 首次改密：old_password = 当前默认密码？服务端要求 old_password 校验。
-    // 首次登录必须改密，此处用会话内改密（服务端在 must_change 时允许直接改）。
+    // 首次登录强制改密：服务端在 must_change 状态下允许不传旧密码，但必须二次确认。
     const d = await api('/api/admin/change-password', {
       method: 'POST',
-      body: JSON.stringify({ new_password: np }),
+      body: JSON.stringify({ new_password: np, new_password_confirm: np2 }),
     });
     msg('chgMsg', '密码已修改，请使用新密码重新登录');
     localStorage.removeItem('acs_token');

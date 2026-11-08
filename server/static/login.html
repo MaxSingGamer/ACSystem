@@ -23,7 +23,9 @@
     <div id="chgForm" class="hidden">
       <div class="login-hint">首次登录须修改密码（≥8 位），修改后使用新密码登录。</div>
       <label for="np">新密码</label>
-      <input id="np" type="password" placeholder="新密码（≥8 位）">
+      <input id="np" type="password" placeholder="新密码（≥8 位）" autocomplete="new-password">
+      <label for="np2">再次输入新密码</label>
+      <input id="np2" type="password" placeholder="再次输入新密码" autocomplete="new-password">
       <button class="btn-primary" onclick="doChange()">修改并重新登录</button>
       <div class="msg" id="chgMsg"></div>
     </div>
