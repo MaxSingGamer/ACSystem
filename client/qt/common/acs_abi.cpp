@@ -3,6 +3,8 @@
 #include <QJsonDocument>
 #include <QLibrary>
 #include <QDebug>
+#include <QMutex>
+#include <QMutexLocker>
 
 #include <memory>
 
@@ -11,6 +13,15 @@
 #endif
 
 namespace {
+
+/// 进程内串行化 ABI 调用：Rust 端持有全局钱包状态（同一个 wallet.db / gpg homedir），
+/// 多线程并发进入会互相抢 SQLite 锁/gpg agent，表现为界面卡死。
+/// 所有调用（包括 UI 线程上的同步调用）都经过这里串行化。
+QMutex &callMutex()
+{
+    static QMutex m;
+    return m;
+}
 
 using AbiVersionFn = unsigned (*)();
 using VersionFn = const char *(*)();
@@ -121,6 +132,7 @@ void Acs::freeString(char *p)
 QJsonObject Acs::call(const QString &method, const QJsonObject &req, QString *error,
                       QString *errorCode)
 {
+    QMutexLocker lock(&callMutex());
     auto &b = bindings();
     if (error) {
         error->clear();

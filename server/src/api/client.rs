@@ -127,7 +127,13 @@ async fn open_account(
     let fp = st
         .gpg
         .fingerprint_of_armored_pubkey(&req.pubkey)
-        .map_err(|_| ApiErr::bad_request("公钥格式无效（需为 gpg armored）"))?;
+        .map_err(|e| {
+            acs_core::log::err(format!(
+                "开立账户公钥解析失败 uid={}：{e}（请检查中心 GnuPG 环境）",
+                req.uid.trim()
+            ));
+            ApiErr::bad_request("公钥格式无效（需为 gpg armored）")
+        })?;
 
     let conn = state::db_lock(&st.db);
     if account::account_exists(&conn, &req.uid, atype)? {

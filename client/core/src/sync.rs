@@ -68,7 +68,7 @@ fn signed_sync_get(w: &Wallet, since: i64) -> Result<ureq::Response> {
         .sign_with(msg.as_bytes(), None)
         .map_err(|e| anyhow!("同步需要账户签名（请重新登录以恢复会话口令）：{e}"))?;
     let sig = signature_header(&sig);
-    shared_agent()
+    match shared_agent()
         .get(&format!("{server}/api/sync?since={since}"))
         .set("X-ACS-Uid", &uid)
         .set("X-ACS-Type", &atype)
@@ -76,7 +76,21 @@ fn signed_sync_get(w: &Wallet, since: i64) -> Result<ureq::Response> {
         .set("X-ACS-Sig", &sig)
         .timeout(std::time::Duration::from_secs(15))
         .call()
-        .map_err(|e| anyhow!("连接中心失败：{e}"))
+    {
+        Ok(resp) => Ok(resp),
+        Err(ureq::Error::Status(code, resp)) => {
+            // 把服务端 401/403 的具体原因带给用户（如「账户不存在」「签名校验失败」），
+            // 否则只能看到一个笼统的 status code，无法判断是客户端版本还是账户密钥问题。
+            let body = resp.into_string().unwrap_or_default();
+            let body = body.trim();
+            if body.is_empty() {
+                Err(anyhow!("连接中心失败：HTTP {code}"))
+            } else {
+                Err(anyhow!("连接中心失败：HTTP {code}：{body}"))
+            }
+        }
+        Err(e) => Err(anyhow!("连接中心失败：{e}")),
+    }
 }
 
 /// 同步：直接从中心服务器拉取增量（v3.0.0 取消镜像，不再发现多个端点）。

@@ -682,16 +682,32 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
 void MainWindow::doLogout()
 {
-    Acs::call(QStringLiteral("logout"));
-    hide();
-    qApp->exit(0);
+    // 异步执行：ABI 调用可能被后台线程占用，不能在 UI 线程上阻塞等待。
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("logout"), {}, this, QStringLiteral("正在退出…"),
+                  [self](const QJsonObject &, const QString &, const QString &) {
+                      if (self)
+                          self->hide();
+                      qApp->exit(0);
+                  });
 }
 
 void MainWindow::openPrivacy()
 {
-    QString err;
-    QJsonObject brand = Acs::call(QStringLiteral("brand"), {}, &err);
-    const QString url = brand.value(QStringLiteral("public_url")).toString() + QStringLiteral("/legal/privacy");
-    if (!acs::openInBrowser(url))
-        acs::showError(this, QStringLiteral("打开失败"), QStringLiteral("请手动访问：%1").arg(url));
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("brand"), {}, this, QStringLiteral("正在打开…"),
+                  [self](const QJsonObject &brand, const QString &err, const QString &) {
+                      if (!self)
+                          return;
+                      if (!err.isEmpty()) {
+                          acs::showError(self, QStringLiteral("打开失败"),
+                                         QStringLiteral("读取中心信息失败：%1").arg(err));
+                          return;
+                      }
+                      const QString url = brand.value(QStringLiteral("public_url")).toString()
+                                          + QStringLiteral("/legal/privacy");
+                      if (!acs::openInBrowser(url))
+                          acs::showError(self, QStringLiteral("打开失败"),
+                                         QStringLiteral("请手动访问：%1").arg(url));
+                  });
 }

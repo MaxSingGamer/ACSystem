@@ -183,6 +183,23 @@ impl GpgUtil {
         passphrase: Option<&str>,
         stdin_data: Option<&[u8]>,
     ) -> Result<(String, String)> {
+        let (ok, out, err) = self.run_homedir_status(homedir, args, passphrase, stdin_data)?;
+        if !ok {
+            return Err(AcsError::gpg(err.trim().to_string()));
+        }
+        Ok((out, err))
+    }
+
+    /// 与 `run_homedir` 相同，但**不把非 0 退出码当作错误**，返回 `(success, stdout, stderr)`。
+    /// 用于 `gpg --verify`：部分 GnuPG 版本在「签名有效但公钥未受信」时会以非 0 退出，
+    /// 真正的结论要看 `--status-fd` 里的 GOODSIG/VALIDSIG。
+    fn run_homedir_status(
+        &self,
+        homedir: &Path,
+        args: &[&str],
+        passphrase: Option<&str>,
+        stdin_data: Option<&[u8]>,
+    ) -> Result<(bool, String, String)> {
         let mut cmd = Command::new(&self.gpg_path);
         // GUI 程序里执行 gpg 不要弹控制台黑窗（v3.3.0 #12 / D23）
         hide_child_window(&mut cmd);
@@ -218,11 +235,8 @@ impl GpgUtil {
         }
 
         let out = child.wait_with_output()?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(AcsError::gpg(err));
-        }
         Ok((
+            out.status.success(),
             String::from_utf8_lossy(&out.stdout).into(),
             String::from_utf8_lossy(&out.stderr).into(),
         ))
@@ -443,12 +457,10 @@ impl GpgUtil {
 
     /// 从 armored 公钥解析指纹（隔离临时 homedir，供中心/服务端校验注册公钥）。
     pub fn fingerprint_of_armored_pubkey(&self, pubkey_armored: &str) -> Result<String> {
-        let dir = self.tmp_dir()?;
-        let homedir = dir.join("homedir");
-        fs::create_dir_all(&homedir)?;
+        let homedir = self.tmp_dir()?;
         self.run_homedir(&homedir, &["--import"], None, Some(pubkey_armored.as_bytes()))?;
         let (out, _) = self.run_homedir(&homedir, &["--with-colons", "--list-keys"], None, None)?;
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&homedir);
         Self::parse_fingerprint(&out, "pubkey")
     }
 
@@ -573,15 +585,13 @@ impl GpgUtil {
         data: &[u8],
         sig_armored: &str,
     ) -> Result<bool> {
-        let dir = self.tmp_dir()?;
-        let homedir = dir.join("homedir");
-        fs::create_dir_all(&homedir)?;
+        let homedir = self.tmp_dir()?;
 
         // 去掉首尾空白，避免 armored 块因换行/空格解析失败
         let pubkey_trimmed = pubkey_armored.trim();
         let sig_trimmed = sig_armored.trim();
         if pubkey_trimmed.is_empty() || sig_trimmed.is_empty() {
-            let _ = fs::remove_dir_all(&dir);
+            let _ = fs::remove_dir_all(&homedir);
             return Ok(false);
         }
 
@@ -592,25 +602,43 @@ impl GpgUtil {
             Some(pubkey_trimmed.as_bytes()),
         )?;
 
-        let data_path = dir.join("data.bin");
-        let sig_path = dir.join("sig.asc");
+        let data_path = homedir.join("data.bin");
+        let sig_path = homedir.join("sig.asc");
         fs::write(&data_path, data)?;
         fs::write(&sig_path, sig_trimmed)?;
 
-        let r = self.run_homedir(
+        let (_, out, _err) = self.run_homedir_status(
             &homedir,
-            &["--verify", sig_path.to_str().unwrap(), data_path.to_str().unwrap()],
+            &[
+                "--status-fd",
+                "1",
+                "--verify",
+                sig_path.to_str().unwrap(),
+                data_path.to_str().unwrap(),
+            ],
             None,
             None,
-        );
-        let _ = fs::remove_dir_all(&dir);
-        Ok(r.is_ok())
+        )?;
+        let _ = fs::remove_dir_all(&homedir);
+        let good = out
+            .lines()
+            .any(|l| l.starts_with("[GNUPG:] GOODSIG") || l.starts_with("[GNUPG:] VALIDSIG"));
+        let bad = out.lines().any(|l| {
+            l.starts_with("[GNUPG:] BADSIG")
+                || l.starts_with("[GNUPG:] ERRSIG")
+                || l.starts_with("[GNUPG:] NO_PUBKEY")
+        });
+        Ok(good && !bad)
     }
 
     // ---- 工具 ----
 
     fn tmp_dir(&self) -> Result<PathBuf> {
-        let dir = std::env::temp_dir().join(format!("acs-gpg-{}", uuid::Uuid::new_v4()));
+        // Windows 上 gpg-agent 的 socket 路径有长度上限（约 108 字符，GnuPG 会报
+        // "socket name ... is too long"）。这里用固定短名 `acsg-<8hex>`，并且直接
+        // 把它当作 GNUPGHOME（不再多一层 homedir），避免用户 TEMP 路径较长时失败。
+        let short = uuid::Uuid::new_v4().simple().to_string();
+        let dir = std::env::temp_dir().join(format!("acsg-{}", &short[..8]));
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }

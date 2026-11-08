@@ -2,6 +2,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QPointer>
 
 #include "ui_common.h"
 
@@ -71,6 +72,9 @@ private:
     QLineEdit *m_transferPass = nullptr;
     bool m_ready = false;              // 构造期不播动画
     qint64 m_balanceShown = 0;         // 当前显示的余额（用于滚动动画起点）
-    QVariantAnimation *m_balanceAnim = nullptr;
-    QParallelAnimationGroup *m_pageAnim = nullptr;
+    // 动画对象用 QPointer：动画以 DeleteWhenStopped 启动，结束后会自动销毁；
+    // 裸指针会变成悬空指针，下一次切页/刷新余额时再 stop() 就会 use-after-free
+    // （表现为切菜单后卡死/窗口消失但进程仍在）。
+    QPointer<QVariantAnimation> m_balanceAnim = nullptr;
+    QPointer<QParallelAnimationGroup> m_pageAnim = nullptr;
 };

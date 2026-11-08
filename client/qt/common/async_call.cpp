@@ -27,13 +27,6 @@
 
 namespace {
 
-/// 进程内串行化 ABI 调用：Rust 端持有全局钱包状态，避免多线程并发进入。
-QMutex &abiMutex()
-{
-    static QMutex m;
-    return m;
-}
-
 /// 品牌蓝旋转圆环（轻量自绘，不依赖系统进度条样式）。
 class Spinner : public QWidget
 {
@@ -213,10 +206,8 @@ void runAsync(const QString &method,
         QJsonObject data;
         QString err;
         QString code;
-        {
-            QMutexLocker lock(&abiMutex());
-            data = Acs::call(method, req, &err, &code);
-        }
+        // 串行化由 Acs::call 内部统一负责（UI 线程的同步调用也走同一把锁）。
+        data = Acs::call(method, req, &err, &code);
         QCoreApplication *app = QCoreApplication::instance();
         if (!app)
             return;

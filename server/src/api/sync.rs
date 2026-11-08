@@ -107,9 +107,14 @@ async fn sync_public(
         .ok_or_else(|| ApiErr::unauthorized("需要客户端签名（缺少 X-ACS-Ts）"))?;
     let sig = header_str(&headers, "x-acs-sig")
         .ok_or_else(|| ApiErr::unauthorized("需要客户端签名（缺少 X-ACS-Sig）"))?;
-    let sig = rearmor_signature(&sig)
-        .ok_or_else(|| ApiErr::unauthorized("同步签名格式无效"))?;
+    let sig = rearmor_signature(&sig).ok_or_else(|| {
+        acs_core::log::err(format!("同步鉴权失败：签名格式无效 uid={uid} type={type_s}"));
+        ApiErr::unauthorized("同步签名格式无效")
+    })?;
     if (Utc::now().timestamp() - ts).abs() > 300 {
+        acs_core::log::err(format!(
+            "同步鉴权失败：时间戳超出范围 uid={uid} type={type_s} ts={ts}"
+        ));
         return Err(ApiErr::unauthorized("签名时间戳超出允许范围"));
     }
     let atype = AccountType::from_str(&type_s).ok_or_else(|| ApiErr::bad_request("无效账户类型"))?;
@@ -117,6 +122,10 @@ async fn sync_public(
     let pubk = {
         let conn = state::db_lock(&st.db);
         account_pubkey(&conn, &uid, atype).ok_or_else(|| {
+            acs_core::log::err(format!(
+                "同步鉴权失败：账户不存在或无公钥 uid={uid} type={}",
+                atype.as_str()
+            ));
             ApiErr::unauthorized("需要有效的账户签名（账户不存在或无公钥）")
         })?
     };
@@ -125,6 +134,10 @@ async fn sync_public(
         .verify_detached(&pubk, msg.as_bytes(), &sig)
         .map_err(ApiErr::from)?
     {
+        acs_core::log::err(format!(
+            "同步鉴权失败：签名校验失败 uid={uid} type={} msg={msg}（本地密钥与中心公钥不一致，或签名消息不一致）",
+            atype.as_str()
+        ));
         return Err(ApiErr::unauthorized("同步签名校验失败"));
     }
     let conn = state::db_lock(&st.db);
