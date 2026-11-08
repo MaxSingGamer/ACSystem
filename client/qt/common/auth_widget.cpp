@@ -39,6 +39,9 @@ bool runRegisterDialog(QWidget *parent, const acs::AppProfile &profile, const QS
     auto *email = new QLineEdit(&dlg);
     auto *pass = new QLineEdit(&dlg);
     pass->setEchoMode(QLineEdit::Password);
+    auto *pass2 = new QLineEdit(&dlg);
+    pass2->setEchoMode(QLineEdit::Password);
+    pass2->setPlaceholderText(QStringLiteral("再次输入钱包口令"));
     email->setPlaceholderText(QStringLiteral("如 name@example.com"));
     fullname->setPlaceholderText(QStringLiteral("国家/企业全称（同类型内唯一）"));
     form->addRow(QStringLiteral("账户类型"), type);
@@ -46,6 +49,7 @@ bool runRegisterDialog(QWidget *parent, const acs::AppProfile &profile, const QS
     form->addRow(QStringLiteral("简称 / UID"), uid);
     form->addRow(QStringLiteral("邮箱"), email);
     form->addRow(QStringLiteral("口令（≥8 位）"), pass);
+    form->addRow(QStringLiteral("再次输入口令"), pass2);
     root->addLayout(form);
 
     auto syncFields = [&] {
@@ -82,6 +86,14 @@ bool runRegisterDialog(QWidget *parent, const acs::AppProfile &profile, const QS
         const QString u = uid->text().trimmed();
         if (u.isEmpty() || email->text().trimmed().isEmpty() || pass->text().size() < 8) {
             err->setText(QStringLiteral("请填写完整：简称、邮箱、口令（≥8 位）"));
+            return;
+        }
+        if (pass2->text().isEmpty()) {
+            err->setText(QStringLiteral("请再次输入口令以确认"));
+            return;
+        }
+        if (pass->text() != pass2->text()) {
+            err->setText(QStringLiteral("两次输入的口令不一致"));
             return;
         }
         const bool needFull = (t == QStringLiteral("Country") || t == QStringLiteral("Company"));
@@ -193,7 +205,7 @@ QString AuthWidget::legalUrl(const QString &doc) const
 void AuthWidget::openTerms()
 {
     const QString t = m_type->currentData().toString();
-    const QString doc = (t == QStringLiteral("Individual") || t == QStringLiteral("System"))
+    const QString doc = (t == QStringLiteral("Individual"))
                             ? QStringLiteral("individual-terms")
                             : QStringLiteral("enterprise-terms");
     if (!acs::openInBrowser(legalUrl(doc))) {

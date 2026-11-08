@@ -3,7 +3,7 @@ Alpha Wallet / AlphaCompanyWallet（A€ 客户端 v4.0.0）
 
 两个客户端（安装后同目录，均从开始菜单启动）：
 
-  AlphaWallet.exe      个人 / 国家 / 系统账户
+  AlphaWallet.exe      个人 / 国家账户
   AlphaCompanyWallet.exe  企业 / 银行账户
 
 首次启动：

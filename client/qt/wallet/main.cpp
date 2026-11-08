@@ -61,11 +61,11 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // 个人版：只允许 个人 / 国家 / 系统（企业账户请用 AlphaCompanyWallet）
+    // 个人版：只允许 个人 / 国家（系统账本账户只能通过 Server 管理后台「系统账本账户登录」，客户端不支持）
     acs::AppProfile profile{
         QStringLiteral("Alpha Wallet"),
         QStringLiteral("Alpha Wallet"),
-        {QStringLiteral("Individual"), QStringLiteral("Country"), QStringLiteral("System")},
+        {QStringLiteral("Individual"), QStringLiteral("Country")},
         true,
     };
 
