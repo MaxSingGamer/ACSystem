@@ -10,6 +10,7 @@ class QLineEdit;
 class QLabel;
 class QCheckBox;
 class QPushButton;
+class QCloseEvent;
 
 class AuthWidget : public QWidget
 {
@@ -28,6 +29,10 @@ private slots:
     void doRegister();
     void openTerms();
     void openPrivacy();
+
+protected:
+    /// 关闭登录/注册页即退出进程（此时主窗口尚未显示，避免关闭后进程残留）。
+    void closeEvent(QCloseEvent *event) override;
 
 private:
     QString legalUrl(const QString &doc) const;

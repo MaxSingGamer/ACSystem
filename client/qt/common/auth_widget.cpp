@@ -1,8 +1,11 @@
 #include "auth_widget.h"
 
 #include "acs_abi.h"
+#include "async_call.h"
 
+#include <QApplication>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -11,6 +14,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -101,26 +105,35 @@ bool runRegisterDialog(QWidget *parent, const acs::AppProfile &profile, const QS
             err->setText(QStringLiteral("国家/企业账户必须填写全称"));
             return;
         }
-        QString e, code;
-        Acs::call(QStringLiteral("register"),
-                  QJsonObject{
-                      {QStringLiteral("server_url"), serverUrl},
-                      {QStringLiteral("uid"), u},
-                      {QStringLiteral("type"), t},
-                      {QStringLiteral("fullname"), fullname->text().trimmed()},
-                      {QStringLiteral("email"), email->text().trimmed()},
-                      {QStringLiteral("password"), pass->text()},
-                      {QStringLiteral("agree_terms"), true},
-                      {QStringLiteral("agree_privacy"), true},
-                  },
-                  &e, &code);
-        if (!e.isEmpty()) {
-            err->setText(Acs::errorText(e, code));
-            return;
-        }
-        acs::showInfo(&dlg, QStringLiteral("注册成功"),
-                      QStringLiteral("账户已注册。请用刚填写的口令登录。"));
-        dlg.accept();
+        const QJsonObject req{
+            {QStringLiteral("server_url"), serverUrl},
+            {QStringLiteral("uid"), u},
+            {QStringLiteral("type"), t},
+            {QStringLiteral("fullname"), fullname->text().trimmed()},
+            {QStringLiteral("email"), email->text().trimmed()},
+            {QStringLiteral("password"), pass->text()},
+            {QStringLiteral("agree_terms"), true},
+            {QStringLiteral("agree_privacy"), true},
+        };
+        auto *okBtn = buttons->button(QDialogButtonBox::Ok);
+        okBtn->setEnabled(false);
+        QPointer<QDialog> dlgGuard(&dlg);
+        QPointer<QLabel> errGuard(err);
+        acs::runAsync(QStringLiteral("register"), req, &dlg, QStringLiteral("正在注册…"),
+                      [dlgGuard, errGuard, okBtn](const QJsonObject &, const QString &e,
+                                                  const QString &code) {
+                          if (!dlgGuard)
+                              return;
+                          okBtn->setEnabled(true);
+                          if (!e.isEmpty()) {
+                              if (errGuard)
+                                  errGuard->setText(Acs::errorText(e, code));
+                              return;
+                          }
+                          acs::showInfo(dlgGuard, QStringLiteral("注册成功"),
+                                        QStringLiteral("账户已注册。请用刚填写的口令登录。"));
+                          dlgGuard->accept();
+                      });
     });
 
     return dlg.exec() == QDialog::Accepted;
@@ -218,8 +231,14 @@ void AuthWidget::openPrivacy()
 {
     if (!acs::openInBrowser(legalUrl(QStringLiteral("privacy")))) {
         acs::showError(this, QStringLiteral("打开失败"),
-                       QStringLiteral("无法打开浏览器，请手动访问：\n%1").arg(legalUrl(QStringLiteral("privacy"))));
+                       QStringLiteral("请手动访问：%1").arg(legalUrl(QStringLiteral("privacy"))));
     }
+}
+
+void AuthWidget::closeEvent(QCloseEvent *event)
+{
+    event->accept();
+    qApp->quit();
 }
 
 void AuthWidget::doLogin()
@@ -234,22 +253,25 @@ void AuthWidget::doLogin()
         return;
     }
     m_loginBtn->setEnabled(false);
-    QString err, code;
-    QJsonObject data = Acs::call(QStringLiteral("login"),
-                                 QJsonObject{
-                                     {QStringLiteral("uid"), m_uid->text().trimmed()},
-                                     {QStringLiteral("password"), m_pass->text()},
-                                     {QStringLiteral("agree_terms"), true},
-                                     {QStringLiteral("agree_privacy"), true},
-                                 },
-                                 &err, &code);
-    m_loginBtn->setEnabled(true);
-    if (!err.isEmpty()) {
-        acs::showError(this, QStringLiteral("登录失败"), Acs::errorText(err, code));
-        return;
-    }
-    m_pass->clear();
-    emit loggedIn();
+    QPointer<AuthWidget> self(this);
+    const QJsonObject req{
+        {QStringLiteral("uid"), m_uid->text().trimmed()},
+        {QStringLiteral("password"), m_pass->text()},
+        {QStringLiteral("agree_terms"), true},
+        {QStringLiteral("agree_privacy"), true},
+    };
+    acs::runAsync(QStringLiteral("login"), req, this, QStringLiteral("正在登录…"),
+                  [self](const QJsonObject &, const QString &err, const QString &code) {
+                      if (!self)
+                          return;
+                      self->m_loginBtn->setEnabled(true);
+                      if (!err.isEmpty()) {
+                          acs::showError(self, QStringLiteral("登录失败"), Acs::errorText(err, code));
+                          return;
+                      }
+                      self->m_pass->clear();
+                      emit self->loggedIn();
+                  });
 }
 
 void AuthWidget::doRegister()

@@ -1,6 +1,7 @@
 #include "center_picker.h"
 
 #include "acs_abi.h"
+#include "async_call.h"
 #include "ui_common.h"
 
 #include <QFormLayout>
@@ -10,6 +11,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPointer>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -145,19 +147,25 @@ void CenterPicker::addCenter()
     }
     if (!url.startsWith(QStringLiteral("http://")) && !url.startsWith(QStringLiteral("https://")))
         url.prepend(QStringLiteral("http://"));
-    QString err, code;
+    m_hint->setText(QStringLiteral("正在连接中心…"));
+    QPointer<CenterPicker> self(this);
     // set_server 会写入历史并拉取该中心的客户端配置（含 service_name，供列表展示）
-    QJsonObject data = Acs::call(QStringLiteral("set_server"),
-                                 QJsonObject{{QStringLiteral("url"), url}}, &err, &code);
-    if (!err.isEmpty()) {
-        m_hint->setText(QStringLiteral("连接中心失败：%1\n（请确认地址正确、服务已启动）")
-                            .arg(Acs::errorText(err, code)));
-        return;
-    }
-    m_selectedUrl = data.value(QStringLiteral("server_url")).toString();
-    if (m_selectedUrl.isEmpty())
-        m_selectedUrl = url;
-    accept();
+    acs::runAsync(QStringLiteral("set_server"), QJsonObject{{QStringLiteral("url"), url}}, this,
+                  QStringLiteral("正在连接中心…"),
+                  [self, url](const QJsonObject &data, const QString &e, const QString &c) {
+                      if (!self)
+                          return;
+                      if (!e.isEmpty()) {
+                          self->m_hint->setText(
+                              QStringLiteral("连接中心失败：%1\n（请确认地址正确、服务已启动）")
+                                  .arg(Acs::errorText(e, c)));
+                          return;
+                      }
+                      self->m_selectedUrl = data.value(QStringLiteral("server_url")).toString();
+                      if (self->m_selectedUrl.isEmpty())
+                          self->m_selectedUrl = url;
+                      self->accept();
+                  });
 }
 
 void CenterPicker::removeCurrent()

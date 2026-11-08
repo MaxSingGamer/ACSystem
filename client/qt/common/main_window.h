@@ -14,6 +14,7 @@ class QPushButton;
 class QButtonGroup;
 class QParallelAnimationGroup;
 class QVariantAnimation;
+class QCloseEvent;
 
 class MainWindow : public QMainWindow
 {
@@ -34,6 +35,10 @@ private slots:
     void rejectSelected();
     void doLogout();
     void openPrivacy();
+
+protected:
+    /// 关闭主窗口即退出进程（避免窗口关闭后仍有后台残留）。
+    void closeEvent(QCloseEvent *event) override;
 
 private:
     QWidget *buildHeader();

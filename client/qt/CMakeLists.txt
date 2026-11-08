@@ -68,6 +68,8 @@ endif()
 add_library(acs_ui STATIC
   common/ui_common.cpp
   common/ui_common.h
+  common/async_call.cpp
+  common/async_call.h
   common/center_picker.cpp
   common/center_picker.h
   common/auth_widget.cpp

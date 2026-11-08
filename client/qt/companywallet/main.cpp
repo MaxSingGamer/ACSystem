@@ -23,10 +23,13 @@ void enableDpiAwareness()
 #endif
 #include <QApplication>
 #include <QDialog>
+#include <QEventLoop>
 #include <QIcon>
 #include <QStringList>
+#include <QWidget>
 
 #include "acs_abi.h"
+#include "async_call.h"
 #include "auth_widget.h"
 #include "center_picker.h"
 #include "main_window.h"
@@ -54,6 +57,7 @@ int main(int argc, char *argv[])
     app.setWindowIcon(QIcon(QStringLiteral(":/icon-client.ico")));
     acs::applyTheme(app);
     app.setApplicationName(QStringLiteral("AlphaCompanyWallet"));
+    app.setQuitOnLastWindowClosed(true);
 
     const QString initErr = Acs::init();
     if (!initErr.isEmpty()) {
@@ -79,8 +83,22 @@ int main(int argc, char *argv[])
             return 0;
         center = picker.selectedUrl();
     } else {
+        // 连接中心可能较慢：用带加载动画的临时窗口 + 嵌套事件循环等待，避免“未响应”。
+        QWidget busy;
+        busy.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+        busy.resize(380, 200);
+        busy.show();
+        QEventLoop loop;
         QString e, code;
-        Acs::call(QStringLiteral("set_server"), {{QStringLiteral("url"), center}}, &e, &code);
+        acs::runAsync(QStringLiteral("set_server"), {{QStringLiteral("url"), center}}, &busy,
+                      QStringLiteral("正在连接中心…"),
+                      [&](const QJsonObject &, const QString &err, const QString &c) {
+                          e = err;
+                          code = c;
+                          loop.quit();
+                      });
+        loop.exec();
+        busy.close();
         if (!e.isEmpty()) {
             acs::showError(nullptr, QStringLiteral("连接中心失败"), Acs::errorText(e, code));
             return 1;
@@ -122,3 +140,4 @@ int main(int argc, char *argv[])
     auth.show();
     return app.exec();
 }
+

@@ -1,9 +1,11 @@
 #include "main_window.h"
 
 #include "acs_abi.h"
+#include "async_call.h"
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
 #include <QFormLayout>
@@ -17,6 +19,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QParallelAnimationGroup>
+#include <QPointer>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QStackedWidget>
@@ -410,41 +413,57 @@ void MainWindow::onLoggedIn()
 
 void MainWindow::refreshState()
 {
-    QString err, code;
-    QJsonObject st = Acs::call(QStringLiteral("state"), {}, &err, &code);
-    if (!err.isEmpty()) {
-        acs::showError(this, QStringLiteral("读取状态失败"), Acs::errorText(err, code));
-        return;
-    }
-    const QString uid = st.value(QStringLiteral("uid")).toString();
-    const QString type = st.value(QStringLiteral("type")).toString();
-    const QString server = st.value(QStringLiteral("server_url")).toString();
-    if (m_chip)
-        m_chip->setText(QStringLiteral("%1 · %2").arg(uid, acs::typeLabel(type)));
-    setBalanceAnimated(st.value(QStringLiteral("balance")).toVariant().toLongLong());
-    m_status->setText(QStringLiteral("账户：%1（%2）\n状态：%3\n中心：%4\n上次同步：%5")
-                          .arg(uid,
-                               acs::typeLabel(type),
-                               st.value(QStringLiteral("status")).toString(),
-                               server,
-                               acs::fmtTime(st.value(QStringLiteral("synced_at")).toVariant().toLongLong())));
-    statusBar()->showMessage(QStringLiteral("状态已刷新"));
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("state"), {}, this, QStringLiteral("正在读取账户状态…"),
+                  [self](const QJsonObject &st, const QString &err, const QString &code) {
+                      if (!self)
+                          return;
+                      if (!err.isEmpty()) {
+                          acs::showError(self, QStringLiteral("读取状态失败"),
+                                         Acs::errorText(err, code));
+                          return;
+                      }
+                      const QString uid = st.value(QStringLiteral("uid")).toString();
+                      const QString type = st.value(QStringLiteral("type")).toString();
+                      const QString server = st.value(QStringLiteral("server_url")).toString();
+                      if (self->m_chip)
+                          self->m_chip->setText(QStringLiteral("%1 · %2")
+                                                    .arg(uid, acs::typeLabel(type)));
+                      self->setBalanceAnimated(
+                          st.value(QStringLiteral("balance")).toVariant().toLongLong());
+                      self->m_status->setText(
+                          QStringLiteral("账户：%1（%2）\n状态：%3\n中心：%4\n上次同步：%5")
+                              .arg(uid,
+                                   acs::typeLabel(type),
+                                   st.value(QStringLiteral("status")).toString(),
+                                   server,
+                                   acs::fmtTime(st.value(QStringLiteral("synced_at"))
+                                                    .toVariant()
+                                                    .toLongLong())));
+                      self->statusBar()->showMessage(QStringLiteral("状态已刷新"));
+                  });
 }
 
 void MainWindow::doSync()
 {
     statusBar()->showMessage(QStringLiteral("正在同步…"));
-    QString err, code;
-    QJsonObject r = Acs::call(QStringLiteral("sync"), {}, &err, &code);
-    if (!err.isEmpty()) {
-        statusBar()->showMessage(QStringLiteral("同步失败"));
-        acs::showError(this, QStringLiteral("同步失败"), Acs::errorText(err, code));
-        return;
-    }
-    statusBar()->showMessage(QStringLiteral("同步完成：交易 %1、账户快照 %2")
-                                 .arg(r.value(QStringLiteral("txs")).toInt())
-                                 .arg(r.value(QStringLiteral("accounts")).toInt()));
-    refreshState();
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("sync"), {}, this, QStringLiteral("正在从中心同步…"),
+                  [self](const QJsonObject &r, const QString &err, const QString &code) {
+                      if (!self)
+                          return;
+                      if (!err.isEmpty()) {
+                          self->statusBar()->showMessage(QStringLiteral("同步失败"));
+                          acs::showError(self, QStringLiteral("同步失败"),
+                                         Acs::errorText(err, code));
+                          return;
+                      }
+                      self->statusBar()->showMessage(
+                          QStringLiteral("同步完成：交易 %1、账户快照 %2")
+                              .arg(r.value(QStringLiteral("txs")).toInt())
+                              .arg(r.value(QStringLiteral("accounts")).toInt()));
+                      self->refreshState();
+                  });
 }
 
 void MainWindow::doTransfer()
@@ -459,82 +478,117 @@ void MainWindow::doTransfer()
         return;
     }
     QString err, code;
-    QJsonObject data = Acs::call(QStringLiteral("transfer"),
-                                 QJsonObject{
-                                     {QStringLiteral("to"), to},
-                                     {QStringLiteral("type"), m_toType->currentData().toString()},
-                                     {QStringLiteral("amount"), amount},
-                                     {QStringLiteral("password"), pass},
-                                 },
-                                 &err, &code);
-    if (!err.isEmpty()) {
-        acs::showError(this, QStringLiteral("转账失败"), Acs::errorText(err, code));
-        return;
-    }
-    m_transferPass->clear();
-    acs::showInfo(this, QStringLiteral("已提交"),
-                  QStringLiteral("转账已提交到中心（状态：%1）。接收方接受后才入账。")
-                      .arg(data.value(QStringLiteral("status")).toString()));
-    refreshState();
+    Q_UNUSED(err);
+    Q_UNUSED(code);
+    const QJsonObject req{
+        {QStringLiteral("to"), to},
+        {QStringLiteral("type"), m_toType->currentData().toString()},
+        {QStringLiteral("amount"), amount},
+        {QStringLiteral("password"), pass},
+    };
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("transfer"), req, this, QStringLiteral("正在提交转账…"),
+                  [self](const QJsonObject &data, const QString &e, const QString &c) {
+                      if (!self)
+                          return;
+                      if (!e.isEmpty()) {
+                          acs::showError(self, QStringLiteral("转账失败"), Acs::errorText(e, c));
+                          return;
+                      }
+                      self->m_transferPass->clear();
+                      acs::showInfo(self, QStringLiteral("已提交"),
+                                    QStringLiteral("转账已提交到中心（状态：%1）。接收方接受后才入账。")
+                                        .arg(data.value(QStringLiteral("status")).toString()));
+                      self->refreshState();
+                  });
 }
 
 void MainWindow::loadPending()
 {
-    QString err, code;
-    QJsonObject data = Acs::call(QStringLiteral("pending"), {}, &err, &code);
-    if (!err.isEmpty()) {
-        statusBar()->showMessage(QStringLiteral("待收箱读取失败：%1").arg(Acs::errorText(err, code)));
-        return;
-    }
-    const QJsonArray items = data.value(QStringLiteral("items")).toArray();
-    m_pending->setRowCount(0);
-    for (const auto &v : items) {
-        const QJsonObject o = v.toObject();
-        const int row = m_pending->rowCount();
-        m_pending->insertRow(row);
-        m_pending->setItem(row, 0, new QTableWidgetItem(
-                                      acs::fmtTime(o.value(QStringLiteral("timestamp")).toVariant().toLongLong())));
-        m_pending->setItem(row, 1, new QTableWidgetItem(o.value(QStringLiteral("tx_type")).toString()));
-        m_pending->setItem(row, 2, new QTableWidgetItem(o.value(QStringLiteral("sender")).toString()));
-        m_pending->setItem(row, 3, new QTableWidgetItem(
-                                      acs::fmtAmount(o.value(QStringLiteral("amount")).toVariant().toLongLong())));
-        m_pending->setItem(row, 4, new QTableWidgetItem(o.value(QStringLiteral("tx_id")).toString()));
-    }
-    statusBar()->showMessage(QStringLiteral("待收：%1 笔").arg(items.size()));
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("pending"), {}, this, QStringLiteral("正在读取待收箱…"),
+                  [self](const QJsonObject &data, const QString &err, const QString &code) {
+                      if (!self)
+                          return;
+                      if (!err.isEmpty()) {
+                          self->statusBar()->showMessage(
+                              QStringLiteral("待收箱读取失败：%1").arg(Acs::errorText(err, code)));
+                          return;
+                      }
+                      const QJsonArray items = data.value(QStringLiteral("items")).toArray();
+                      self->m_pending->setRowCount(0);
+                      for (const auto &v : items) {
+                          const QJsonObject o = v.toObject();
+                          const int row = self->m_pending->rowCount();
+                          self->m_pending->insertRow(row);
+                          self->m_pending->setItem(
+                              row, 0,
+                              new QTableWidgetItem(acs::fmtTime(
+                                  o.value(QStringLiteral("timestamp")).toVariant().toLongLong())));
+                          self->m_pending->setItem(
+                              row, 1,
+                              new QTableWidgetItem(o.value(QStringLiteral("tx_type")).toString()));
+                          self->m_pending->setItem(
+                              row, 2,
+                              new QTableWidgetItem(o.value(QStringLiteral("sender")).toString()));
+                          self->m_pending->setItem(
+                              row, 3,
+                              new QTableWidgetItem(acs::fmtAmount(
+                                  o.value(QStringLiteral("amount")).toVariant().toLongLong())));
+                          self->m_pending->setItem(
+                              row, 4,
+                              new QTableWidgetItem(o.value(QStringLiteral("tx_id")).toString()));
+                      }
+                      self->statusBar()->showMessage(
+                          QStringLiteral("待收：%1 笔").arg(items.size()));
+                  });
 }
 
 void MainWindow::loadLedger()
 {
-    QString err, code;
-    QJsonObject data = Acs::call(QStringLiteral("ledger"), {}, &err, &code);
-    if (!err.isEmpty()) {
-        statusBar()->showMessage(QStringLiteral("流水读取失败：%1").arg(Acs::errorText(err, code)));
-        return;
-    }
-    const QJsonArray txs = data.value(QStringLiteral("txs")).toArray();
-    m_ledger->setRowCount(0);
-    for (const auto &v : txs) {
-        const QJsonArray a = v.toArray(); // [tx_id, tx_type, peer, peer_type, amount, ts, status, dir]
-        if (a.size() < 8)
-            continue;
-        const int row = m_ledger->rowCount();
-        m_ledger->insertRow(row);
-        const qint64 amount = a.at(4).toVariant().toLongLong();
-        const int dir = a.at(7).toInt();
-        m_ledger->setItem(row, 0, new QTableWidgetItem(acs::fmtTime(a.at(5).toVariant().toLongLong())));
-        m_ledger->setItem(row, 1, new QTableWidgetItem(a.at(1).toString()));
-        m_ledger->setItem(row,
-                          2,
-                          new QTableWidgetItem(QStringLiteral("%1 · %2").arg(
-                              a.at(2).toString(), acs::typeLabel(a.at(3).toString()))));
-        auto *amt = new QTableWidgetItem(
-            QStringLiteral("%1%2 A€").arg(dir >= 0 ? QStringLiteral("+") : QStringLiteral("-"),
-                                          acs::fmtAmount(amount)));
-        amt->setForeground(QColor(dir >= 0 ? QStringLiteral("#0A7D4B") : QStringLiteral("#E60028")));
-        m_ledger->setItem(row, 3, amt);
-        m_ledger->setItem(row, 4, new QTableWidgetItem(a.at(6).toString()));
-    }
-    statusBar()->showMessage(QStringLiteral("流水：%1 笔").arg(txs.size()));
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("ledger"), {}, this, QStringLiteral("正在读取流水…"),
+                  [self](const QJsonObject &data, const QString &err, const QString &code) {
+                      if (!self)
+                          return;
+                      if (!err.isEmpty()) {
+                          self->statusBar()->showMessage(
+                              QStringLiteral("流水读取失败：%1").arg(Acs::errorText(err, code)));
+                          return;
+                      }
+                      const QJsonArray txs = data.value(QStringLiteral("txs")).toArray();
+                      self->m_ledger->setRowCount(0);
+                      for (const auto &v : txs) {
+                          const QJsonArray a = v.toArray(); // [tx_id, tx_type, peer, peer_type, amount, ts, status, dir]
+                          if (a.size() < 8)
+                              continue;
+                          const int row = self->m_ledger->rowCount();
+                          self->m_ledger->insertRow(row);
+                          const qint64 amount = a.at(4).toVariant().toLongLong();
+                          const int dir = a.at(7).toInt();
+                          self->m_ledger->setItem(
+                              row, 0,
+                              new QTableWidgetItem(
+                                  acs::fmtTime(a.at(5).toVariant().toLongLong())));
+                          self->m_ledger->setItem(
+                              row, 1, new QTableWidgetItem(a.at(1).toString()));
+                          self->m_ledger->setItem(
+                              row, 2,
+                              new QTableWidgetItem(QStringLiteral("%1 · %2").arg(
+                                  a.at(2).toString(), acs::typeLabel(a.at(3).toString()))));
+                          auto *amt = new QTableWidgetItem(
+                              QStringLiteral("%1%2 A€").arg(
+                                  dir >= 0 ? QStringLiteral("+") : QStringLiteral("-"),
+                                  acs::fmtAmount(amount)));
+                          amt->setForeground(QColor(dir >= 0 ? QStringLiteral("#0A7D4B")
+                                                             : QStringLiteral("#E60028")));
+                          self->m_ledger->setItem(row, 3, amt);
+                          self->m_ledger->setItem(
+                              row, 4, new QTableWidgetItem(a.at(6).toString()));
+                      }
+                      self->statusBar()->showMessage(
+                          QStringLiteral("流水：%1 笔").arg(txs.size()));
+                  });
 }
 
 QString MainWindow::selectedPendingTxId() const
@@ -560,16 +614,24 @@ void MainWindow::confirmSelected()
     if (!ok || pass.isEmpty())
         return;
     QString err, code;
-    Acs::call(QStringLiteral("confirm"),
-              QJsonObject{{QStringLiteral("tx_id"), txId}, {QStringLiteral("password"), pass}},
-              &err, &code);
-    if (!err.isEmpty()) {
-        acs::showError(this, QStringLiteral("接受失败"), Acs::errorText(err, code));
-        return;
-    }
-    acs::showInfo(this, QStringLiteral("已接受"), QStringLiteral("收款已确认，余额会在同步后更新。"));
-    loadPending();
-    doSync();
+    Q_UNUSED(err);
+    Q_UNUSED(code);
+    const QJsonObject req{{QStringLiteral("tx_id"), txId},
+                          {QStringLiteral("password"), pass}};
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("confirm"), req, this, QStringLiteral("正在确认收款…"),
+                  [self](const QJsonObject &, const QString &e, const QString &c) {
+                      if (!self)
+                          return;
+                      if (!e.isEmpty()) {
+                          acs::showError(self, QStringLiteral("接受失败"), Acs::errorText(e, c));
+                          return;
+                      }
+                      acs::showInfo(self, QStringLiteral("已接受"),
+                                    QStringLiteral("收款已确认，余额会在同步后更新。"));
+                      self->loadPending();
+                      self->doSync();
+                  });
 }
 
 void MainWindow::rejectSelected()
@@ -591,17 +653,31 @@ void MainWindow::rejectSelected()
     if (!ok)
         return;
     QString err, code;
-    Acs::call(QStringLiteral("reject"),
-              QJsonObject{{QStringLiteral("tx_id"), txId},
+    Q_UNUSED(err);
+    Q_UNUSED(code);
+    const QJsonObject req{{QStringLiteral("tx_id"), txId},
                           {QStringLiteral("password"), pass},
-                          {QStringLiteral("reason"), reason}},
-              &err, &code);
-    if (!err.isEmpty()) {
-        acs::showError(this, QStringLiteral("拒收失败"), Acs::errorText(err, code));
-        return;
-    }
-    acs::showInfo(this, QStringLiteral("已拒收"), QStringLiteral("交易已拒收，金额将退回发送方。"));
-    loadPending();
+                          {QStringLiteral("reason"), reason}};
+    QPointer<MainWindow> self(this);
+    acs::runAsync(QStringLiteral("reject"), req, this, QStringLiteral("正在拒收…"),
+                  [self](const QJsonObject &, const QString &e, const QString &c) {
+                      if (!self)
+                          return;
+                      if (!e.isEmpty()) {
+                          acs::showError(self, QStringLiteral("拒收失败"), Acs::errorText(e, c));
+                          return;
+                      }
+                      acs::showInfo(self, QStringLiteral("已拒收"),
+                                    QStringLiteral("交易已拒收，金额将退回发送方。"));
+                      self->loadPending();
+                  });
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    // 关闭主窗口即结束进程：避免窗口关闭后因后台线程/隐藏窗口残留进程。
+    event->accept();
+    qApp->quit();
 }
 
 void MainWindow::doLogout()
