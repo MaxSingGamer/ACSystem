@@ -31,6 +31,13 @@ try {
 if (-not (Test-Path $dll)) { throw "未找到 $dll" }
 
 Write-Host "== 2/4 CMake 构建 QT 客户端 ($qtCfg) ==" -ForegroundColor Cyan
+if ($Release) {
+    # Release 打包前清空部署目录：避免把调试构建遗留的 *d.dll（Qt Debug 运行库）打进安装包。
+    if (Test-Path $outDir) {
+        Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 $batch = @"
 @echo off
 call "$VcVars" >nul
@@ -54,7 +61,9 @@ if ($LASTEXITCODE -ne 0) { throw "CMake 构建/拷贝失败" }
 Write-Host "== 3/4 windeployqt 收集 Qt 运行库 ==" -ForegroundColor Cyan
 $wdq = Join-Path $QtDir 'bin\windeployqt.exe'
 foreach ($exe in @('AlphaWallet.exe', 'AlphaCompanyWallet.exe')) {
-    & $wdq --no-translations --no-system-d3d-compiler --no-opengl-sw (Join-Path $outDir $exe)
+    $wdqArgs = @('--no-translations', '--no-system-d3d-compiler', '--no-opengl-sw')
+    if ($Release) { $wdqArgs += '--release' }
+    & $wdq @wdqArgs (Join-Path $outDir $exe)
     if ($LASTEXITCODE -ne 0) { throw "windeployqt 失败：$exe" }
 }
 
